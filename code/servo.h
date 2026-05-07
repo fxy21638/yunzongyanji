@@ -14,7 +14,7 @@
 // 占空比 = 高电平时间 / 周期 * 10000
 //        = 10000 / (1000 / FREQ) * (0.5 + angle / 90.0)
 #define ANGLE_TO_DUTY(angle) \
-    ((uint16_t)(1650 + (110 * (uint16_t)(angle)) / 3))
+    ((uint16_t)(1750 + (110 * (uint16_t)(angle)) / 3))
 	
 void servo_Init(void);
 void servo_task(void);

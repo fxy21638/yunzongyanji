@@ -28,6 +28,7 @@
 #include "main.h"
 
 void System_Init(void);
+void debug_main(void);
 	
 int main()
 {
@@ -40,18 +41,8 @@ int main()
     while (1) 
     {
         // 在这里添加您的应用代码
+		debug_main();
 		
-		// 按键扫描 (周期10ms)
-        //key_scan(10);
-		
-		//vofa_image_task();
-		//vision_task();
-		
-		//icm_debug();
-		
-		//servo_task();
-		
-		motor_task();
 			
         // 在这里添加您的应用代码
 		
@@ -63,19 +54,35 @@ int main()
 
 void System_Init(void)
 {
-	//key_system_Init();
-	
-	//servo_Init();
+	key_system_Init();
 	
 	//vision_Init();
 	
-	//icm_Init();
+	//icm_Init();	//会启动5ms定时器（tim0）
 	
 	//ips_init(IPS_TYPE_200);
 	
-	motor_Init();
+	//motor_Init();
 	
 	//encoder_Init();
 	
-	//servo_Init();	//转到中间（90度再启动）
+	servo_Init();	//转到中间（90度再启动）
+}
+
+void debug_main(void)
+{
+	// 按键扫描 (周期10ms)
+	key_scan(10);
+	
+	//vofa_image_task();
+	//vision_task();
+	
+	//icm_debug();
+	
+	servo_task();
+	
+	//motor_task();
+	
+	//encoder_task();
+	//encoder_debug();
 }

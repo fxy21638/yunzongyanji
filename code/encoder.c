@@ -23,21 +23,25 @@
 
 int16_t enc1_value, enc2_value;
 int16_t last_enc1_value = 0;
+int16_t last_enc2_value = 0;
 
 void encoder_Init(void)
 {
 	// 编码器1初始化 - 正交编码模式
-    encoder_init_quad(ENCODER_PWMC, ENC1_A_PIN, ENC1_B_PIN);
+    encoder_init_quad(ENC1_PWM, ENC1_A_PIN, ENC1_B_PIN);
+	
+	// 编码器2初始化 - 正交编码模式
+    encoder_init_quad(ENC2_PWM, ENC2_A_PIN, ENC1_B_PIN);
 
     // 编码器2初始化 - 带方向编码模式
-    encoder_init_dir(ENCODER_PWMD, ENC2_P_PIN, ENC2_D_PIN);
+    //encoder_init_dir(ENCODER_PWMD, ENC2_P_PIN, ENC2_D_PIN);
 }
 	
 void encoder_task(void)
 {
 	// 读取编码器值
-    enc1_value = encoder_read(ENCODER_PWMC);
-    enc2_value = encoder_read(ENCODER_PWMD);
+    enc1_value = encoder_read(ENC1_PWM);
+    enc2_value = encoder_read(ENC2_PWM);
 
     // 检测编码器1旋转方向
     if (enc1_value > last_enc1_value) {
@@ -47,8 +51,17 @@ void encoder_task(void)
         // 逆时针旋转
         gpio_write_pin(LED, 1);
     }
+	
+	if (enc2_value > last_enc2_value) {
+        // 顺时针旋转
+        gpio_write_pin(LED, 0);
+    } else if (enc2_value < last_enc2_value) {
+        // 逆时针旋转
+        gpio_write_pin(LED, 1);
+    }
 
-    last_enc1_value = enc1_value;
+	last_enc1_value = enc1_value;
+    last_enc2_value = enc2_value;
 }
 
 void encoder_debug(void)
