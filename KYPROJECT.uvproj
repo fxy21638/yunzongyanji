@@ -375,34 +375,14 @@
               <FilePath>.\code\icm.h</FilePath>
             </File>
             <File>
-              <FileName>vision.c</FileName>
+              <FileName>control.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\code\vision.c</FilePath>
+              <FilePath>.\code\control.c</FilePath>
             </File>
             <File>
-              <FileName>vision.h</FileName>
+              <FileName>control.h</FileName>
               <FileType>5</FileType>
-              <FilePath>.\code\vision.h</FilePath>
-            </File>
-            <File>
-              <FileName>vision_track.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\code\vision_track.c</FilePath>
-            </File>
-            <File>
-              <FileName>vision_track.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>.\code\vision_track.h</FilePath>
-            </File>
-            <File>
-              <FileName>vision_master.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\code\vision_master.c</FilePath>
-            </File>
-            <File>
-              <FileName>vision_master.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>.\code\vision_master.h</FilePath>
+              <FilePath>.\code\control.h</FilePath>
             </File>
             <File>
               <FileName>pid.c</FileName>
@@ -425,14 +405,44 @@
               <FilePath>.\code\trail.h</FilePath>
             </File>
             <File>
-              <FileName>control.c</FileName>
+              <FileName>vision.c</FileName>
               <FileType>1</FileType>
-              <FilePath>.\code\control.c</FilePath>
+              <FilePath>.\code\vision.c</FilePath>
             </File>
             <File>
-              <FileName>control.h</FileName>
+              <FileName>vision.h</FileName>
               <FileType>5</FileType>
-              <FilePath>.\code\control.h</FilePath>
+              <FilePath>.\code\vision.h</FilePath>
+            </File>
+            <File>
+              <FileName>vision_isp.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\vision_isp.c</FilePath>
+            </File>
+            <File>
+              <FileName>vision_isp.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\vision_isp.h</FilePath>
+            </File>
+            <File>
+              <FileName>vision_master.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\vision_master.c</FilePath>
+            </File>
+            <File>
+              <FileName>vision_master.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\vision_master.h</FilePath>
+            </File>
+            <File>
+              <FileName>vision_track.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\vision_track.c</FilePath>
+            </File>
+            <File>
+              <FileName>vision_track.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\vision_track.h</FilePath>
             </File>
           </Files>
         </Group>

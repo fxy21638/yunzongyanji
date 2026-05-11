@@ -11,13 +11,6 @@
 
 #include "vision_track.h"
 
-#ifdef __INTELLISENSE__
-// 仅用于 VS Code 语法分析；Keil 编译时由库头文件提供真实定义
-typedef uint16_t Color_t;
-void ips_fill_rectangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, Color_t color, uint8_t enable);
-void ips_draw_point(uint16_t x, uint16_t y, Color_t color);
-#endif
-
 #ifndef MT9V034_WIDTH
 #error "MT9V034_WIDTH not defined"
 #endif
@@ -75,11 +68,6 @@ void ips_draw_point(uint16_t x, uint16_t y, Color_t color);
 // 注意：这里保持为“纯宏常量表达式”，避免某些 C251 环境对强转/typedef 作为数组维度挑剔
 #define VISION_CONTOUR_MAX_POINTS (4u * (MT9V034_WIDTH + MT9V034_HEIGHT))
 
-// RGB565 颜色常量
-#define VISION_RGB565_BLACK ((Color_t)0x0000)
-#define VISION_RGB565_WHITE ((Color_t)0xFFFF)
-#define VISION_RGB565_BLUE ((Color_t)0x001F)
-#define VISION_RGB565_RED ((Color_t)0xF800)
 
 static uint16_t g_contour_points[VISION_CONTOUR_MAX_POINTS][2];
 static int16_t g_last_center_x = -1;
@@ -1403,80 +1391,3 @@ void vision_track_process(const uint8_t *gray, uint8_t *bin, vision_track_result
     compute_center_error(res, res);
 }
 
-void vision_track_debug_draw(uint8_t *bin, const vision_track_result_t *res)
-{
-    uint16_t y;
-
-    for (y = 0; y < VISION_H; y++)
-    {
-        int16_t l = res->left[y];
-        int16_t r = res->right[y];
-        int16_t m = res->mid[y];
-
-        if (l >= 0)
-        {
-            // 这里写入的是“伪灰度”用于调试显示：
-            // - left/right：180
-            // - mid：100
-            // 若你的显示链路对灰度映射不同，可按需要改成更显眼的值。
-            bin[y * VISION_W + (uint16_t)l] = 180; // left
-            bin[y * VISION_W + (uint16_t)r] = 180; // right
-            bin[y * VISION_W + (uint16_t)m] = 100; // mid
-        }
-    }
-}
-
-void vision_track_show_color(uint16_t x, uint16_t y, const vision_track_result_t *res)
-{
-    uint16_t row;
-
-    for (row = 0; row < VISION_H; row++)
-    {
-        int16_t l = res->left[row];
-        int16_t r = res->right[row];
-        int16_t m = res->mid[row];
-
-        // 默认整行蓝色
-        if (l < 0 || r < 0 || l > r)
-        {
-            ips_fill_rectangle(x, (uint16_t)(y + row), (uint16_t)(x + VISION_W - 1), (uint16_t)(y + row), VISION_RGB565_BLUE, 0);
-            continue;
-        }
-
-        // 左侧蓝色
-        if (l > 0)
-        {
-            ips_fill_rectangle(x, (uint16_t)(y + row), (uint16_t)(x + (uint16_t)l - 1), (uint16_t)(y + row), VISION_RGB565_BLUE, 0);
-        }
-
-        // 赛道白色
-        ips_fill_rectangle((uint16_t)(x + (uint16_t)l), (uint16_t)(y + row), (uint16_t)(x + (uint16_t)r), (uint16_t)(y + row), VISION_RGB565_WHITE, 0);
-
-        // 右侧蓝色
-        if (r < (int16_t)(VISION_W - 1))
-        {
-            ips_fill_rectangle((uint16_t)(x + (uint16_t)r + 1), (uint16_t)(y + row), (uint16_t)(x + VISION_W - 1), (uint16_t)(y + row), VISION_RGB565_BLUE, 0);
-        }
-
-        // 中线黑色（1像素宽）
-        if (m >= 0 && m < (int16_t)VISION_W)
-        {
-            ips_draw_point((uint16_t)(x + (uint16_t)m), (uint16_t)(y + row), VISION_RGB565_BLACK);
-        }
-    }
-}
-
-void vision_track_overlay_lines(uint16_t x, uint16_t y, const vision_track_result_t *res)
-{
-    uint16_t row;
-
-    for (row = 0; row < VISION_H; row++)
-    {
-        int16_t m = res->mid[row];
-
-        if (m >= 0 && m < (int16_t)VISION_W)
-        {
-            ips_draw_point((uint16_t)(x + (uint16_t)m), (uint16_t)(y + row), VISION_RGB565_RED);
-        }
-    }
-}

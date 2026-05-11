@@ -130,9 +130,6 @@ typedef struct
 } vision_track_result_t;
 
 void vision_track_process(const uint8_t *gray, uint8_t *bin, vision_track_result_t *res);
-void vision_track_debug_draw(uint8_t *bin, const vision_track_result_t *res);
-void vision_track_show_color(uint16_t x, uint16_t y, const vision_track_result_t *res);
-void vision_track_overlay_lines(uint16_t x, uint16_t y, const vision_track_result_t *res);
 
 #ifdef __cplusplus
 }

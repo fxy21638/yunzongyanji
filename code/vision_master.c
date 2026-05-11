@@ -90,32 +90,48 @@ static int16_t detect_cross_break_row_track(const vision_track_result_t *track)
 {
 	int16_t base_w;
 	int16_t y;
-	uint8_t streak = 0;
+	int16_t cross_start = -1;
+	uint8_t in_cross = 0;
+	uint8_t narrow_streak = 0;
 
-	base_w = average_lane_width_track(track, DISPLAY_CROSS_BASE_Y0, DISPLAY_CROSS_BASE_Y1);
-	if (base_w < 20)
+	// 用图像上半部（正常赛道）计算基准宽度，避免十字底部宽行污染 base_w
+	base_w = average_lane_width_track(track, (uint16_t)(MT9V034_HEIGHT / 3), (uint16_t)(MT9V034_HEIGHT / 2));
+	if (base_w < 8)
 	{
 		return -1;
 	}
 
-	for (y = (int16_t)(DISPLAY_CROSS_BASE_Y0 - 1); y >= (int16_t)(MT9V034_HEIGHT / 4); y--)
+	// 从底部向上扫描：先进入十字宽区域，持续追踪最高宽行，
+	// 遇到连续窄行（离开十字）后返回十字起始行。
+	for (y = (int16_t)(MT9V034_HEIGHT - 1); y >= (int16_t)(MT9V034_HEIGHT / 4); y--)
 	{
 		if (track->left[(uint16_t)y] >= 0 && track->right[(uint16_t)y] >= 0)
 		{
 			int16_t w = (int16_t)(track->right[(uint16_t)y] - track->left[(uint16_t)y] + 1);
-			if (w > base_w + base_w / 3)
+			if (w > base_w + base_w / 2)
 			{
-				streak++;
-				if (streak >= DISPLAY_CROSS_MIN_STREAK)
+				if (!in_cross)
 				{
-					return y;
+					in_cross = 1;
+				}
+				cross_start = y;
+				narrow_streak = 0;
+			}
+			else if (in_cross)
+			{
+				narrow_streak++;
+				if (narrow_streak >= DISPLAY_CROSS_MIN_STREAK)
+				{
+					return cross_start;
 				}
 			}
-			else
-			{
-				streak = 0;
-			}
 		}
+	}
+
+	// 十字延伸到扫描范围顶部
+	if (in_cross && cross_start >= 0)
+	{
+		return cross_start;
 	}
 
 	return -1;
@@ -186,10 +202,21 @@ static void stabilize_cross_boundaries(const vision_track_result_t *track, int16
 	display_line_q8_t left_line;
 	display_line_q8_t right_line;
 	uint16_t y;
-	uint16_t y0;
-	uint16_t y1;
+	uint16_t y_fit_start;
+	uint16_t y_fit_end;
+	static uint8_t cross_hold = 0;
 
-	if (track->feature != VISION_FEATURE_CROSS)
+	// 十字滞回：进入需要 feature==CROSS，退出需要连续 4 帧非 CROSS
+	if (track->feature == VISION_FEATURE_CROSS)
+	{
+		cross_hold = 4;
+	}
+	else if (cross_hold > 0)
+	{
+		cross_hold--;
+	}
+
+	if (cross_hold == 0)
 	{
 		return;
 	}
@@ -200,15 +227,21 @@ static void stabilize_cross_boundaries(const vision_track_result_t *track, int16
 		return;
 	}
 
-	y0 = (uint16_t)(break_row + 4);
-	y1 = (uint16_t)(break_row + 24);
-	if (!fit_edge_line_q8_track(track->left, y0, y1, &left_line) ||
-		!fit_edge_line_q8_track(track->right, y0, y1, &right_line))
+	// 用十字上方正常赛道的边界做拟合，然后向下外推到十字区域
+	if (break_row < 12)
+	{
+		return;
+	}
+	y_fit_end = (uint16_t)(break_row - 4);
+	y_fit_start = (uint16_t)(break_row - 28);
+	if (!fit_edge_line_q8_track(track->left, y_fit_start, y_fit_end, &left_line) ||
+		!fit_edge_line_q8_track(track->right, y_fit_start, y_fit_end, &right_line))
 	{
 		return;
 	}
 
-	for (y = 0; y <= (uint16_t)break_row; y++)
+	// 填充十字区域（break_row 往下到底部），保留正常赛道原有边界
+	for (y = (uint16_t)break_row; y < MT9V034_HEIGHT; y++)
 	{
 		left_buf[y] = eval_line_q8_track(&left_line, y);
 		right_buf[y] = eval_line_q8_track(&right_line, y);
