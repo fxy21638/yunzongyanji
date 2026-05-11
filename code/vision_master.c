@@ -478,16 +478,19 @@ void vofa_image_task(void)
 {
 	if (mt9v034_frame_ready)
 	{
+		// 一次处理，三张图复用 g_vofa_track 和 image_data
 		vision_track_process((const uint8_t *)mt9v034_image, (uint8_t *)image_data, &g_vofa_track);
 
+		// 1. 原始灰度图
 		vofa_sendGrayscaleImageEx((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
 
-		render_overlay_mid((uint8_t *)image_data, (const uint8_t *)mt9v034_image, &g_vofa_track);
-		vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
-
-		vision_track_process((const uint8_t *)mt9v034_image, (uint8_t *)image_data, &g_vofa_track);
+		// 2. 二值化伪彩图（image_data 当前是二值化结果，render_pseudo_gray 原地转换）
 		render_pseudo_gray((uint8_t *)image_data, (const uint8_t *)image_data, &g_vofa_track);
 		vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
+
+		// 3. 灰度叠加中线图（覆盖 image_data）
+		render_overlay_mid((uint8_t *)image_data, (const uint8_t *)mt9v034_image, &g_vofa_track);
+		vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
 
 		mt9v034_frame_ready = 0;
 	}
