@@ -424,6 +424,16 @@
               <FileType>5</FileType>
               <FilePath>.\code\trail.h</FilePath>
             </File>
+            <File>
+              <FileName>control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\control.c</FilePath>
+            </File>
+            <File>
+              <FileName>control.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\control.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

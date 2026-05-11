@@ -1,70 +1,53 @@
-/*******************************************************************************
- * ½ÓÏßËµÃ÷:
- * -----------------------------------------------------------------------------
- * Ä£¿é         | Òý½Å         | Á¬½ÓËµÃ÷
- * -------------|--------------|----------------------------------------------
- * ±àÂëÆ÷1 AÏà   | ENC1_A_PIN   | ½ÓP8.0 (PWMC AÏà - Õý½»Ä£Ê½)
- * ±àÂëÆ÷1 BÏà   | ENC1_B_PIN   | ½ÓP8.2 (PWMC BÏà - Õý½»Ä£Ê½)
- * ±àÂëÆ÷2 Âö³å  | ENC2_P_PIN   | ½ÓP8.1 (PWMD Âö³å - ´ø·½ÏòÄ£Ê½)
- * ±àÂëÆ÷2 ·½Ïò  | ENC2_D_PIN   | ½ÓP8.3 (PWMD ·½Ïò - ´ø·½ÏòÄ£Ê½)
- * LEDÖ¸Ê¾µÆ    | LED_PIN      | ½ÓPB6
- * -----------------------------------------------------------------------------
- *
- * ÊµÑéÏÖÏó:
- * -----------------------------------------------------------------------------
- * 1. Ðý×ª±àÂëÆ÷1(Õý½»Ä£Ê½)£¬¼ÆÊýÆ÷ÖµËæÖ®Ôö¼Ó»ò¼õÉÙ
- * 2. Ðý×ª±àÂëÆ÷2(´ø·½ÏòÄ£Ê½)£¬¼ÆÊýÆ÷Öµ¸ù¾Ý·½ÏòÐÅºÅÔö¼Ó»ò¼õÉÙ
- * 3. Ë³Ê±ÕëÐý×ª¼ÆÊýÆ÷Ôö¼Ó£¬ÄæÊ±ÕëÐý×ª¼ÆÊýÆ÷¼õÉÙ
- * 4. Í¨¹ýUSB CDCÐéÄâ´®¿ÚÊä³öÁ½¸ö±àÂëÆ÷¼ÆÊýÖµ
- * 5. LEDÖ¸Ê¾µÆ×´Ì¬±íÊ¾±àÂëÆ÷1µÄÕý·´×ª
- * -----------------------------------------------------------------------------
- ******************************************************************************/
-#include "encoder.h"
+ï»¿#include "encoder.h"
+#include "main.h"
 
-int16_t enc1_value, enc2_value;
+int16_t enc1_value = 0;
+int16_t enc2_value = 0;
 int16_t last_enc1_value = 0;
 int16_t last_enc2_value = 0;
+int16_t encoder_data_dir[2] = {0, 0};
 
 void encoder_Init(void)
 {
-	// ±àÂëÆ÷1³õÊ¼»¯ - Õý½»±àÂëÄ£Ê½
     encoder_init_quad(ENC1_PWM, ENC1_A_PIN, ENC1_B_PIN);
-	
-	// ±àÂëÆ÷2³õÊ¼»¯ - Õý½»±àÂëÄ£Ê½
-    encoder_init_quad(ENC2_PWM, ENC2_A_PIN, ENC1_B_PIN);
-
-    // ±àÂëÆ÷2³õÊ¼»¯ - ´ø·½Ïò±àÂëÄ£Ê½
-    //encoder_init_dir(ENCODER_PWMD, ENC2_P_PIN, ENC2_D_PIN);
+    encoder_init_quad(ENC2_PWM, ENC2_A_PIN, ENC2_B_PIN);
 }
-	
+
 void encoder_task(void)
 {
-	// ¶ÁÈ¡±àÂëÆ÷Öµ
     enc1_value = encoder_read(ENC1_PWM);
     enc2_value = encoder_read(ENC2_PWM);
 
-    // ¼ì²â±àÂëÆ÷1Ðý×ª·½Ïò
-    if (enc1_value > last_enc1_value) {
-        // Ë³Ê±ÕëÐý×ª
+    encoder_data_dir[0] = enc1_value - last_enc1_value;
+    encoder_data_dir[1] = enc2_value - last_enc2_value;
+
+    if (enc1_value > last_enc1_value)
+    {
         gpio_write_pin(LED, 0);
-    } else if (enc1_value < last_enc1_value) {
-        // ÄæÊ±ÕëÐý×ª
-        gpio_write_pin(LED, 1);
     }
-	
-	if (enc2_value > last_enc2_value) {
-        // Ë³Ê±ÕëÐý×ª
-        gpio_write_pin(LED, 0);
-    } else if (enc2_value < last_enc2_value) {
-        // ÄæÊ±ÕëÐý×ª
+    else if (enc1_value < last_enc1_value)
+    {
         gpio_write_pin(LED, 1);
     }
 
-	last_enc1_value = enc1_value;
+    if (enc2_value > last_enc2_value)
+    {
+        gpio_write_pin(LED, 0);
+    }
+    else if (enc2_value < last_enc2_value)
+    {
+        gpio_write_pin(LED, 1);
+    }
+
+    last_enc1_value = enc1_value;
     last_enc2_value = enc2_value;
 }
 
 void encoder_debug(void)
 {
-	printf("ENC1(Q): %d, ENC2(D): %d\r\n", enc1_value, enc2_value);
+    printf("ENC1:%d ENC2:%d DL:%d DR:%d\r\n",
+           enc1_value,
+           enc2_value,
+           encoder_data_dir[0],
+           encoder_data_dir[1]);
 }

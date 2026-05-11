@@ -1,59 +1,131 @@
-/*******************************************************************************
- * 接线说明:
- * -----------------------------------------------------------------------------
- * 模块         | 引脚         | 连接说明
- * -------------|--------------|----------------------------------------------
- * ICM45686 SCL | IMU_SPI_SCL  | 接P0.5 (SPI2 SCLK)
- * ICM45686 SDA | IMU_SPI_SDA  | 接P0.3 (SPI2 MOSI)
- * ICM45686 SDO | IMU_SPI_SDO  | 接P0.4 (SPI2 MISO)
- * ICM45686 CS  | IMU_SPI_CS   | 接P0.2 (片选)
- * -----------------------------------------------------------------------------
- *
- * 实验现象:
- * -----------------------------------------------------------------------------
- * 1. 通过USB CDC虚拟串口输出加速度计数据 (X/Y/Z轴)
- * 2. 通过USB CDC虚拟串口输出陀螺仪数据 (X/Y/Z轴)
- * 3. 通过USB CDC虚拟串口输出温度数据
- * 4. LED指示灯闪烁表示数据正常读取
- * -----------------------------------------------------------------------------
- ******************************************************************************/
 #include "icm.h"
 
-// 三轴积分角度
-float integral_roll  = 0.0f;  // X轴 横滚角
-float integral_pitch = 0.0f;  // Y轴 俯仰角
-float integral_yaw   = 0.0f;  // Z轴 偏航角
+#define ICM_SAMPLE_DT            (0.005f)
+#define ICM_GYRO_CALIB_SAMPLES   (500)
+#define ICM_CALIB_DELAY_MS       (2)
+#define ICM_COMPLEMENTARY_ALPHA  (0.98f)
+#define ICM_GYRO_Z_DEADBAND_DPS  (0.15f)
+#define ICM_GYRO_Z_BIAS_TRACK_DPS (0.80f)
+#define ICM_BIAS_ADAPT_ALPHA     (0.01f)
+#define RAD_TO_DEG               (57.2957795f)
+
+float roll  = 0.0f;
+float pitch = 0.0f;
+float yaw   = 0.0f;
+
+static float gyro_bias_x = 0.0f;
+static float gyro_bias_y = 0.0f;
+static float gyro_bias_z = 0.0f;
+
+static float icm_absf(float value)
+{
+    return (value < 0.0f) ? -value : value;
+}
+
+static float icm_get_acc_roll_deg(void)
+{
+    return math_atan2(g_icm42686_data.acc.y, g_icm42686_data.acc.z) * RAD_TO_DEG;
+}
+
+static float icm_get_acc_pitch_deg(void)
+{
+    float acc_yz_sq = g_icm42686_data.acc.y * g_icm42686_data.acc.y +
+                      g_icm42686_data.acc.z * g_icm42686_data.acc.z;
+    float acc_yz = 0.0f;
+
+    if (acc_yz_sq > 0.0f)
+    {
+        acc_yz = acc_yz_sq * math_inv_sqrt(acc_yz_sq);
+    }
+
+    return math_atan2(-g_icm42686_data.acc.x, acc_yz) * RAD_TO_DEG;
+}
+
+static void icm_calibrate_gyro_bias(void)
+{
+    uint16_t i;
+    float sum_x = 0.0f;
+    float sum_y = 0.0f;
+    float sum_z = 0.0f;
+
+    for (i = 0; i < ICM_GYRO_CALIB_SAMPLES; i++)
+    {
+        icm42686_read_gyro();
+        sum_x += g_icm42686_data.gyro.x;
+        sum_y += g_icm42686_data.gyro.y;
+        sum_z += g_icm42686_data.gyro.z;
+        delay_ms(ICM_CALIB_DELAY_MS);
+    }
+
+    gyro_bias_x = sum_x / ICM_GYRO_CALIB_SAMPLES;
+    gyro_bias_y = sum_y / ICM_GYRO_CALIB_SAMPLES;
+    gyro_bias_z = sum_z / ICM_GYRO_CALIB_SAMPLES;
+}
 
 void icm_Init(void)
 {
-	icm42686_init();
-	
-	// 延时等待传感器稳定
+    icm42686_init();
+
     delay_ms(100);
-	
-	// 启动5ms定时器
+
+    icm_calibrate_gyro_bias();
+
+    icm42686_read_acc();
+    roll = icm_get_acc_roll_deg();
+    pitch = icm_get_acc_pitch_deg();
+    yaw = 0.0f;
+
     timer_init_ms(0, 5, tim0_callback);
 }
 
 void tim0_callback(void)
 {
-    float raw_x, raw_y, raw_z;
+    float gyro_x;
+    float gyro_y;
+    float gyro_z;
+    float gyro_x_raw;
+    float gyro_y_raw;
+    float gyro_z_raw;
+    float gyro_z_err;
+    float acc_roll;
+    float acc_pitch;
 
     icm42686_read_gyro();
     icm42686_read_acc();
 
-    // 去除原始值个位数噪声
-    raw_x = (float)((icm42686_gyro_raw_x / 10) * 10) / 16.4f;
-    raw_y = (float)((icm42686_gyro_raw_y / 10) * 10) / 16.4f;
-    raw_z = (float)((icm42686_gyro_raw_z / 10) * 10) / 16.4f;
+    gyro_x_raw = g_icm42686_data.gyro.x;
+    gyro_y_raw = g_icm42686_data.gyro.y;
+    gyro_z_raw = g_icm42686_data.gyro.z;
+    gyro_z_err = gyro_z_raw - gyro_bias_z;
 
-    // 积分
-    integral_roll  += (raw_x ) * 0.005f;
-    integral_pitch += (raw_y ) * 0.005f;
-    integral_yaw   += (raw_z ) * 0.005f;
+    if (icm_absf(gyro_z_err) < ICM_GYRO_Z_BIAS_TRACK_DPS)
+    {
+        gyro_bias_z = (1.0f - ICM_BIAS_ADAPT_ALPHA) * gyro_bias_z + ICM_BIAS_ADAPT_ALPHA * gyro_z_raw;
+    }
+
+    gyro_x = gyro_x_raw - gyro_bias_x;
+    gyro_y = gyro_y_raw - gyro_bias_y;
+    gyro_z = gyro_z_raw - gyro_bias_z;
+
+    if (gyro_z > -ICM_GYRO_Z_DEADBAND_DPS && gyro_z < ICM_GYRO_Z_DEADBAND_DPS)
+    {
+        gyro_z = 0.0f;
+    }
+
+    acc_roll = icm_get_acc_roll_deg();
+    acc_pitch = icm_get_acc_pitch_deg();
+
+    roll = ICM_COMPLEMENTARY_ALPHA * (roll + gyro_x * ICM_SAMPLE_DT) +
+           (1.0f - ICM_COMPLEMENTARY_ALPHA) * acc_roll;
+    pitch = ICM_COMPLEMENTARY_ALPHA * (pitch + gyro_y * ICM_SAMPLE_DT) +
+            (1.0f - ICM_COMPLEMENTARY_ALPHA) * acc_pitch;
+    if (icm_absf(gyro_z) >= ICM_GYRO_Z_DEADBAND_DPS)
+    {
+        yaw += gyro_z * ICM_SAMPLE_DT;
+    }
 }
 
 void icm_debug(void)
 {
-	printf("Roll:%.2f,Pitch:%.2f,Yaw:%.2f\n", integral_roll, integral_pitch, integral_yaw);
+    printf("Roll:%.2f,Pitch:%.2f,Yaw:%.2f,BiasZ:%.3f\n", roll, pitch, yaw, gyro_bias_z);
 }

@@ -286,10 +286,6 @@ static uint8_t extract_edges_8neighbor(const uint8_t *bin, vision_track_result_t
     uint16_t y;
 
     // 先在图像底部附近找一个“边界赛道像素”作为轮廓跟踪种子点。
-    // 常见失败原因：
-    // - 底部赛道被阈值吃掉（bin 全是 255）
-    // - 底部噪声严重，找不到满足“边界像素”条件的点
-    // 失败会回退到逐行提取（extract_edges）。
     if (!find_seed_boundary(bin, &sx, &sy))
     {
         return 0;
@@ -297,11 +293,6 @@ static uint8_t extract_edges_8neighbor(const uint8_t *bin, vision_track_result_t
 
     {
         // 跟踪得到外轮廓点集。
-        // n 太小通常表示：
-        // - 种子点找到了，但连通区域很小（可能是噪点）
-        // - 轮廓被断裂（阈值/去噪不合适）
-        // 这里用 n<40 作为“明显不可信”的快速判定；如果你的赛道很窄/分辨率更小，
-        // 可适当降低该阈值，但更推荐先把二值化质量调好。
         uint16_t n = trace_contour_moore(bin, sx, sy);
         if (n < 40)
             return 0;
@@ -352,8 +343,6 @@ static uint8_t extract_edges_8neighbor(const uint8_t *bin, vision_track_result_t
         }
 
         // 需要足够多的有效行才认为“轮廓提取成功”。
-        // - 阈值越高：更严格，失败时更容易回退到逐行算法。
-        // - 阈值越低：更容易“勉强成功”，但边界可能稀疏、需要更多兜底扫描。
         return (res->valid_rows > (uint8_t)(VISION_H / 3));
     }
 }

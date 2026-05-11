@@ -3,6 +3,10 @@
 
 #include "ky_headfile.h"
 
+extern float roll;
+extern float pitch;
+extern float yaw;
+
 void icm_Init(void);
 void tim0_callback(void);
 void icm_debug(void);
