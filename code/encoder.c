@@ -21,24 +21,6 @@ void encoder_task(void)
     encoder_data_dir[0] = enc1_value - last_enc1_value;
     encoder_data_dir[1] = enc2_value - last_enc2_value;
 
-    if (enc1_value > last_enc1_value)
-    {
-        gpio_write_pin(LED, 0);
-    }
-    else if (enc1_value < last_enc1_value)
-    {
-        gpio_write_pin(LED, 1);
-    }
-
-    if (enc2_value > last_enc2_value)
-    {
-        gpio_write_pin(LED, 0);
-    }
-    else if (enc2_value < last_enc2_value)
-    {
-        gpio_write_pin(LED, 1);
-    }
-
     last_enc1_value = enc1_value;
     last_enc2_value = enc2_value;
 }

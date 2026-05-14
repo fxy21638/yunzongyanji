@@ -2,6 +2,7 @@
 #include "encoder.h"
 #include "icm.h"
 #include "servo.h"
+#include "motor.h"
 
 float speed_base = 180;
 float gyro_target = 0;
@@ -12,6 +13,28 @@ float speed_l = 0;
 float speed_r = 0;
 float speed_now_l = 0;
 float speed_now_r = 0;
+
+static void control_timer_callback(void)
+{
+    encoder_task();
+
+    if (track_element == NONE)
+    {
+        motor_clear();
+        servo_set_wheel_angle(0.0f);
+        Set_PWM(0, 0);
+        return;
+    }
+
+    motor_speed_control();
+    steering_control();
+    Set_PWM((int16_t)speed_now_l, (int16_t)speed_now_r);
+}
+
+void control_Init(void)
+{
+    timer_init_ms(TIM_1, 10, control_timer_callback);
+}
 
 void all_control(void)
 {

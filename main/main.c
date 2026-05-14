@@ -3,7 +3,6 @@
 
 void System_Init(void);
 void debug_main(void);
-static void control_task(void);
 
 int main()
 {
@@ -28,20 +27,13 @@ void System_Init(void)
     motor_Init();
     encoder_Init();
     servo_Init();
+    control_Init();
 }
 
 void debug_main(void)
 {
     //key_scan(10);
     //servo_task();
-    //control_task();
-	vofa_image_task();
-}
-
-static void control_task(void)
-{
-    encoder_task();
+    //vofa_image_task();
     track_handle();
-    all_control();
-    Set_PWM((int16_t)speed_now_l, (int16_t)speed_now_r);
 }

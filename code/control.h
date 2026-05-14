@@ -26,6 +26,7 @@ extern float speed_r;
 extern float speed_now_l;
 extern float speed_now_r;
 
+void control_Init(void);
 void all_control(void);
 void motor_speed_control(void);
 void steering_control(void);
