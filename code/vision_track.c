@@ -685,6 +685,7 @@ static void classify_feature(const vision_track_result_t *res, vision_track_resu
     uint16_t y;
     uint8_t cross_cnt = 0, ring_left_cnt = 0, ring_right_cnt = 0;
     uint16_t y0 = (uint16_t)(VISION_H / 2);
+    static uint8_t cross_hold = 0;
 
     for (y = y0; y < VISION_H; y++)
     {
@@ -710,10 +711,22 @@ static void classify_feature(const vision_track_result_t *res, vision_track_resu
     }
 
     if (out->valid_rows < (uint8_t)(VISION_H / 4))
-        { out->feature = VISION_FEATURE_LOST; return; }
+        { out->feature = VISION_FEATURE_LOST; cross_hold = 0; return; }
 
     if (cross_cnt >= 6)
-        { out->feature = VISION_FEATURE_CROSS; return; }
+    {
+        cross_hold = 4;
+        out->feature = VISION_FEATURE_CROSS;
+        return;
+    }
+
+    if (cross_hold > 0)
+    {
+        cross_hold--;
+        out->feature = VISION_FEATURE_CROSS;
+        return;
+    }
+
     if (ring_left_cnt >= 6 && ring_right_cnt < 3)
         { out->feature = VISION_FEATURE_RING_LEFT; return; }
     if (ring_right_cnt >= 6 && ring_left_cnt < 3)
