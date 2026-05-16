@@ -674,6 +674,49 @@ static void stabilize_rows_against_glare(vision_track_result_t *res)
     }
 }
 
+// 单边补全：用已知车道宽度中位数，根据单边边界估算缺失边
+static void fill_missing_edges_by_width(vision_track_result_t *res)
+{
+    uint16_t y, i, j;
+    int16_t widths[VISION_H];
+    uint16_t valid_cnt = 0;
+    int16_t med_w;
+
+    for (y = 0; y < VISION_H; y++)
+    {
+        if (res->left[y] >= 0 && res->right[y] >= 0)
+            widths[valid_cnt++] = (int16_t)(res->right[y] - res->left[y] + 1);
+    }
+
+    if (valid_cnt < 8) return;
+
+    for (i = 0; i < valid_cnt; i++)
+        for (j = (uint16_t)(i + 1); j < valid_cnt; j++)
+            if (widths[j] < widths[i])
+                { int16_t t = widths[i]; widths[i] = widths[j]; widths[j] = t; }
+
+    med_w = widths[valid_cnt / 2];
+    if (med_w < (int16_t)VISION_MIN_RUN_LEN) return;
+
+    for (y = (uint16_t)(VISION_H / 3); y < VISION_H; y++)
+    {
+        if (res->left[y] >= 0 && res->right[y] >= 0) continue;
+
+        if (res->left[y] >= 0 && res->right[y] < 0)
+        {
+            int16_t r = (int16_t)(res->left[y] + med_w);
+            if (r < (int16_t)VISION_W)
+                { res->right[y] = r; res->mid[y] = (int16_t)((res->left[y] + r) / 2); res->valid_rows++; }
+        }
+        else if (res->right[y] >= 0 && res->left[y] < 0)
+        {
+            int16_t l = (int16_t)(res->right[y] - med_w);
+            if (l >= 0)
+                { res->left[y] = l; res->mid[y] = (int16_t)((l + res->right[y]) / 2); res->valid_rows++; }
+        }
+    }
+}
+
 /* ============================================================
  * 特征分类
  * ============================================================ */
@@ -1011,6 +1054,7 @@ void vision_track_process(const uint8_t *gray, uint8_t *bin, vision_track_result
 #endif
     interpolate_edge_gaps(res);
     stabilize_rows_against_glare(res);
+    fill_missing_edges_by_width(res);
 
     // 6. 特征分类
     classify_feature(res, res);
