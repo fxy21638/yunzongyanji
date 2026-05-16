@@ -446,7 +446,7 @@ void track_handle(void)
     if (current_element == CROSS)
     {
         broken_flag_clear();
-        track_midpoint_target = plan_cross_center();
+        track_midpoint_target = CENTER_POINT;
         track_element = CROSS;
     }
     else if (current_element == RIGHT_ANGLE_l || current_element == RIGHT_ANGLE_r)
