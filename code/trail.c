@@ -448,29 +448,20 @@ void track_handle(void)
         broken_flag_clear();
         track_midpoint_target = plan_cross_center();
         track_element = CROSS;
-        report_track_element_if_changed();
-        return;
     }
-
-    if (current_element == RIGHT_ANGLE_l || current_element == RIGHT_ANGLE_r)
+    else if (current_element == RIGHT_ANGLE_l || current_element == RIGHT_ANGLE_r)
     {
         broken_flag_clear();
         track_midpoint_target = plan_turn_center(current_element);
         track_element = current_element;
-        report_track_element_if_changed();
-        return;
     }
-
-    if (current_element == RING_l || current_element == RING_r || current_element == RING_c)
+    else if (current_element == RING_l || current_element == RING_r || current_element == RING_c)
     {
         broken_flag_clear();
         track_midpoint_target = plan_straight_center();
         track_element = current_element;
-        report_track_element_if_changed();
-        return;
     }
-
-    if (current_element == BROKEN)
+    else if (current_element == BROKEN)
     {
         if (broken_judged())
         {
@@ -482,13 +473,20 @@ void track_handle(void)
             track_element = BROKEN;
             track_midpoint_target = track_midpoint_target_P;
         }
-        report_track_element_if_changed();
-        return;
+    }
+    else
+    {
+        broken_flag_clear();
+        track_straight_target(0);
+        track_element = STRAIGHT;
     }
 
-    broken_flag_clear();
-    track_straight_target(0);
-    track_element = STRAIGHT;
+    if (track_element != BROKEN_RODE && track_element != NONE)
+    {
+        uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
+        track_midpoint_target = (uint8_t)((smooth + 2) / 4);
+    }
+
     report_track_element_if_changed();
 }
 

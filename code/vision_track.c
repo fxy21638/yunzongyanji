@@ -790,6 +790,7 @@ static void cross_fill_borders(vision_track_result_t *res)
     uint8_t in_cross = 0, narrow_streak = 0;
     uint16_t y_fit_end, y_fit_start;
     long kL_q10, bL_q10, kR_q10, bR_q10;
+    static int16_t g_last_break_y = -1;
 
     for (y = (int16_t)(VISION_H - 1); y >= 0; y--)
     {
@@ -820,7 +821,15 @@ static void cross_fill_borders(vision_track_result_t *res)
         }
     }
 
-    if (break_y < 0) return;
+    if (break_y < 0)
+    {
+        g_last_break_y = -1;
+        return;
+    }
+
+    if (g_last_break_y >= 0)
+        break_y = (int16_t)((break_y + g_last_break_y * 3 + 2) / 4);
+    g_last_break_y = break_y;
 
     y_fit_end = (uint16_t)break_y;
     if (y_fit_end <= 5) return;
@@ -910,10 +919,15 @@ static void compute_center_error(const vision_track_result_t *res, vision_track_
         uint16_t den = (uint16_t)VISION_CENTER_SMOOTH_DEN;
         if (den == 0) den = 1;
 
-        if (g_last_center_x >= 0 && num <= den)
+        if (g_last_center_x >= 0)
         {
-            uint16_t old_num = (uint16_t)(den - num);
-            cx = (int16_t)(((long)num * (long)cx + (long)old_num * (long)g_last_center_x) / (long)den);
+            if (res->feature == VISION_FEATURE_CROSS)
+                cx = (int16_t)(((long)cx + (long)g_last_center_x) / 2);
+            else if (num <= den)
+            {
+                uint16_t old_num = (uint16_t)(den - num);
+                cx = (int16_t)(((long)num * (long)cx + (long)old_num * (long)g_last_center_x) / (long)den);
+            }
         }
 
         // 帧间跳变限幅

@@ -3,7 +3,6 @@
 #include "icm.h"
 #include "servo.h"
 #include "motor.h"
-#include "vision.h"
 
 float speed_base = 180;
 float gyro_target = 0;
@@ -80,14 +79,7 @@ void steering_control(void)
     float steer_output;
     float track_error;
 
-    if (track_element == CROSS)
-    {
-        track_error = -(float)g_track.error_x;
-    }
-    else
-    {
-        track_error = (float)CENTER_POINT - (float)track_midpoint_target;
-    }
+    track_error = (float)CENTER_POINT - (float)track_midpoint_target;
 
     if (track_element == BROKEN_RODE)
     {
