@@ -83,11 +83,19 @@ void steering_control(void)
 
     if (track_element == BROKEN_RODE)
     {
+#if (CASCADE_PID == 1)
+        steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
+#else
         steer_output = PositionalPID_Calculate(&inertia_pid, gyro_target - yaw);
+#endif
     }
     else
     {
+#if (CASCADE_PID == 1)
+        steer_output = PositionalPID_Calculate(&pid_pos, track_error);
+#else
         steer_output = AnglePID_Calculate(&angle_pid, track_error);
+#endif
     }
 
     steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
