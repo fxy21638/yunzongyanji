@@ -19,6 +19,10 @@ typedef unsigned long uint32_t;
 #define MT9V034_HEIGHT 120
 #endif
 
+#ifndef VISION_LOOKAHEAD_Y
+#define VISION_LOOKAHEAD_Y (MT9V034_HEIGHT - 35)
+#endif
+
 #ifdef __cplusplus
 extern "C"
 {

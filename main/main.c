@@ -32,8 +32,17 @@ void System_Init(void)
 
 void debug_main(void)
 {
-    //key_scan(10);
-    //servo_task();
+    static uint8_t started = 0;
+
+    key_scan(10);
+
+    if (!started)
+    {
+        if (key_is_pressed(KEY1_ID))
+            started = 1;
+        return;
+    }
+
     //vofa_image_task();
     track_handle();
 }

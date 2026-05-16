@@ -27,8 +27,6 @@
 #define VISION_CROSS_END_TH_NUM  (VISION_W * 7 / 10)
 #define VISION_EDGE_NEAR_TH      2
 
-#define VISION_LOOKAHEAD_Y      (MT9V034_HEIGHT - 35)
-
 #define VISION_CONTOUR_MAX_POINTS (4u * (MT9V034_WIDTH + MT9V034_HEIGHT))
 
 /* ============================================================
@@ -676,6 +674,49 @@ static void stabilize_rows_against_glare(vision_track_result_t *res)
     }
 }
 
+// 单边补全：用已知车道宽度中位数，根据单边边界估算缺失边
+static void fill_missing_edges_by_width(vision_track_result_t *res)
+{
+    uint16_t y, i, j;
+    int16_t widths[VISION_H];
+    uint16_t valid_cnt = 0;
+    int16_t med_w;
+
+    for (y = 0; y < VISION_H; y++)
+    {
+        if (res->left[y] >= 0 && res->right[y] >= 0)
+            widths[valid_cnt++] = (int16_t)(res->right[y] - res->left[y] + 1);
+    }
+
+    if (valid_cnt < 8) return;
+
+    for (i = 0; i < valid_cnt; i++)
+        for (j = (uint16_t)(i + 1); j < valid_cnt; j++)
+            if (widths[j] < widths[i])
+                { int16_t t = widths[i]; widths[i] = widths[j]; widths[j] = t; }
+
+    med_w = widths[valid_cnt / 2];
+    if (med_w < (int16_t)VISION_MIN_RUN_LEN) return;
+
+    for (y = (uint16_t)(VISION_H / 3); y < VISION_H; y++)
+    {
+        if (res->left[y] >= 0 && res->right[y] >= 0) continue;
+
+        if (res->left[y] >= 0 && res->right[y] < 0)
+        {
+            int16_t r = (int16_t)(res->left[y] + med_w);
+            if (r < (int16_t)VISION_W)
+                { res->right[y] = r; res->mid[y] = (int16_t)((res->left[y] + r) / 2); res->valid_rows++; }
+        }
+        else if (res->right[y] >= 0 && res->left[y] < 0)
+        {
+            int16_t l = (int16_t)(res->right[y] - med_w);
+            if (l >= 0)
+                { res->left[y] = l; res->mid[y] = (int16_t)((l + res->right[y]) / 2); res->valid_rows++; }
+        }
+    }
+}
+
 /* ============================================================
  * 特征分类
  * ============================================================ */
@@ -685,6 +726,7 @@ static void classify_feature(const vision_track_result_t *res, vision_track_resu
     uint16_t y;
     uint8_t cross_cnt = 0, ring_left_cnt = 0, ring_right_cnt = 0;
     uint16_t y0 = (uint16_t)(VISION_H / 2);
+    static uint8_t cross_hold = 0;
 
     for (y = y0; y < VISION_H; y++)
     {
@@ -710,10 +752,22 @@ static void classify_feature(const vision_track_result_t *res, vision_track_resu
     }
 
     if (out->valid_rows < (uint8_t)(VISION_H / 4))
-        { out->feature = VISION_FEATURE_LOST; return; }
+        { out->feature = VISION_FEATURE_LOST; cross_hold = 0; return; }
 
     if (cross_cnt >= 6)
-        { out->feature = VISION_FEATURE_CROSS; return; }
+    {
+        cross_hold = 4;
+        out->feature = VISION_FEATURE_CROSS;
+        return;
+    }
+
+    if (cross_hold > 0)
+    {
+        cross_hold--;
+        out->feature = VISION_FEATURE_CROSS;
+        return;
+    }
+
     if (ring_left_cnt >= 6 && ring_right_cnt < 3)
         { out->feature = VISION_FEATURE_RING_LEFT; return; }
     if (ring_right_cnt >= 6 && ring_left_cnt < 3)
@@ -779,6 +833,7 @@ static void cross_fill_borders(vision_track_result_t *res)
     uint8_t in_cross = 0, narrow_streak = 0;
     uint16_t y_fit_end, y_fit_start;
     long kL_q10, bL_q10, kR_q10, bR_q10;
+    static int16_t g_last_break_y = -1;
 
     for (y = (int16_t)(VISION_H - 1); y >= 0; y--)
     {
@@ -809,7 +864,15 @@ static void cross_fill_borders(vision_track_result_t *res)
         }
     }
 
-    if (break_y < 0) return;
+    if (break_y < 0)
+    {
+        g_last_break_y = -1;
+        return;
+    }
+
+    if (g_last_break_y >= 0)
+        break_y = (int16_t)((break_y + g_last_break_y * 3 + 2) / 4);
+    g_last_break_y = break_y;
 
     y_fit_end = (uint16_t)break_y;
     if (y_fit_end <= 5) return;
@@ -899,10 +962,15 @@ static void compute_center_error(const vision_track_result_t *res, vision_track_
         uint16_t den = (uint16_t)VISION_CENTER_SMOOTH_DEN;
         if (den == 0) den = 1;
 
-        if (g_last_center_x >= 0 && num <= den)
+        if (g_last_center_x >= 0)
         {
-            uint16_t old_num = (uint16_t)(den - num);
-            cx = (int16_t)(((long)num * (long)cx + (long)old_num * (long)g_last_center_x) / (long)den);
+            if (res->feature == VISION_FEATURE_CROSS)
+                cx = (int16_t)(((long)cx + (long)g_last_center_x) / 2);
+            else if (num <= den)
+            {
+                uint16_t old_num = (uint16_t)(den - num);
+                cx = (int16_t)(((long)num * (long)cx + (long)old_num * (long)g_last_center_x) / (long)den);
+            }
         }
 
         // 帧间跳变限幅
@@ -986,6 +1054,7 @@ void vision_track_process(const uint8_t *gray, uint8_t *bin, vision_track_result
 #endif
     interpolate_edge_gaps(res);
     stabilize_rows_against_glare(res);
+    fill_missing_edges_by_width(res);
 
     // 6. 特征分类
     classify_feature(res, res);

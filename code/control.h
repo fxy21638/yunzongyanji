@@ -3,7 +3,7 @@
 
 #include "ky_headfile.h"
 
-#define CASCADE_PID (2)
+#define CASCADE_PID (1)
 
 #include "trail.h"
 #include "pid.h"

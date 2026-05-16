@@ -4,7 +4,10 @@
 #include "servo.h"
 #include "motor.h"
 
-float speed_base = 180;
+float speed_base = 80;
+
+#define FIXED_SPEED_DEBUG 1
+#define FIXED_PWM_DUTY 600
 float gyro_target = 0;
 float gyro_control = 60;
 uint8_t turn_step = 0;
@@ -26,14 +29,19 @@ static void control_timer_callback(void)
         return;
     }
 
+#if FIXED_SPEED_DEBUG
+    speed_now_l = FIXED_PWM_DUTY;
+    speed_now_r = FIXED_PWM_DUTY;
+#else
     motor_speed_control();
+#endif
     steering_control();
     Set_PWM((int16_t)speed_now_l, (int16_t)speed_now_r);
 }
 
 void control_Init(void)
 {
-    timer_init_ms(TIM_1, 10, control_timer_callback);
+    timer_init_ms(TIM_1, 5, control_timer_callback);
 }
 
 void all_control(void)
@@ -83,14 +91,29 @@ void steering_control(void)
 
     if (track_element == BROKEN_RODE)
     {
+#if (CASCADE_PID == 1)
+        steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
+#else
         steer_output = PositionalPID_Calculate(&inertia_pid, gyro_target - yaw);
+#endif
     }
     else
     {
+#if (CASCADE_PID == 1)
+        steer_output = PositionalPID_Calculate(&pid_pos, track_error);
+#else
         steer_output = AnglePID_Calculate(&angle_pid, track_error);
+#endif
     }
 
     steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
+
+    {
+        static float steer_smooth = 0.0f;
+        steer_output = steer_smooth * 0.2f + steer_output * 0.8f;
+        steer_smooth = steer_output;
+    }
+
     servo_set_wheel_angle(steer_output);
 }
 
