@@ -34,6 +34,6 @@ void debug_main(void)
 {
     //key_scan(10);
     //servo_task();
-    //vofa_image_task();
-    track_handle();
+    vofa_image_task();
+    //track_handle();
 }

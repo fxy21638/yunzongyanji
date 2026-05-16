@@ -27,8 +27,6 @@
 #define VISION_CROSS_END_TH_NUM  (VISION_W * 7 / 10)
 #define VISION_EDGE_NEAR_TH      2
 
-#define VISION_LOOKAHEAD_Y      (MT9V034_HEIGHT - 35)
-
 #define VISION_CONTOUR_MAX_POINTS (4u * (MT9V034_WIDTH + MT9V034_HEIGHT))
 
 /* ============================================================
