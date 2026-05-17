@@ -15,7 +15,7 @@ int main()
     {
         debug_main();
         gpio_toggle_pin(LED);
-        delay_ms(5);
+        //delay_ms(5);
     }
 }
 

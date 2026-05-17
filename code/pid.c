@@ -1,4 +1,4 @@
-﻿#include "main.h"
+#include "main.h"
 
 #if (CASCADE_PID == 1)
 IncrementalPID speed_pid_l = {1.37f, 0.20f, 0.0f, 0.0f};
