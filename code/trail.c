@@ -284,11 +284,11 @@ static TRACK_ELEMENT detect_turn_scene(void)
         }
     }
 
-    if (dx > (lane_w / 5) && left_edge_lost >= TRACK_MIN_VALID_TURN_ROWS)
+    if (dx > (lane_w / 6) && left_edge_lost >= TRACK_MIN_VALID_TURN_ROWS)
     {
         return RIGHT_ANGLE_l;
     }
-    if (dx < -(lane_w / 5) && right_edge_lost >= TRACK_MIN_VALID_TURN_ROWS)
+    if (dx < -(lane_w / 6) && right_edge_lost >= TRACK_MIN_VALID_TURN_ROWS)
     {
         return RIGHT_ANGLE_r;
     }
@@ -332,7 +332,7 @@ static uint8_t plan_straight_center(void)
     far_mid = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_FAR);
     if (near_mid >= 0 && far_mid >= 0)
     {
-        target = (int16_t)((near_mid * 2 + far_mid) / 3);
+        target = (int16_t)((near_mid + far_mid * 2) / 3);
         return clamp_center_to_target(target);
     }
     if (g_track.center_x >= 0)
@@ -431,6 +431,8 @@ static void report_track_element_if_changed(void)
 
 void track_handle(void)
 {
+    static uint8_t cross_exit_hold = 0;
+
     vision_poll_track();
     if (!g_track_valid)
     {
@@ -448,6 +450,12 @@ void track_handle(void)
         broken_flag_clear();
         track_midpoint_target = CENTER_POINT;
         track_element = CROSS;
+        cross_exit_hold = 3;
+    }
+    else if (track_element == CROSS && cross_exit_hold > 0)
+    {
+        cross_exit_hold--;
+        track_midpoint_target = CENTER_POINT;
     }
     else if (current_element == RIGHT_ANGLE_l || current_element == RIGHT_ANGLE_r)
     {
