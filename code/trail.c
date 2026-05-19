@@ -5,7 +5,7 @@
 #define TRACK_LOOKAHEAD_Y_FAR  (MT9V034_HEIGHT / 2)
 #define TRACK_EDGE_NEAR_TH     3
 #define TRACK_WIDE_TH          (MT9V034_WIDTH * 7 / 10)
-#define TRACK_TURN_SHIFT       18
+#define TRACK_TURN_SHIFT       28
 #define TRACK_MIN_VALID_TURN_ROWS 8
 #define CROSS_MIN_STREAK       3
 
@@ -481,10 +481,18 @@ void track_handle(void)
         track_element = STRAIGHT;
     }
 
-    if (track_element != BROKEN_RODE && track_element != NONE && track_element != CROSS)
+    if (track_element != BROKEN_RODE && track_element != NONE)
     {
-        uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
-        track_midpoint_target = (uint8_t)((smooth + 2) / 4);
+        if (track_element == CROSS)
+        {
+            uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P;
+            track_midpoint_target = (uint8_t)((smooth + 1) / 2);
+        }
+        else
+        {
+            uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
+            track_midpoint_target = (uint8_t)((smooth + 2) / 4);
+        }
     }
 
     report_track_element_if_changed();
