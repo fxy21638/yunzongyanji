@@ -826,22 +826,32 @@ static int16_t eval_line_q10(long k_q10, long b_q10, uint16_t y)
     else            return (int16_t)((x_q10 - (1 << 9)) >> 10);
 }
 
-// 十字补线：用十字上方正常赛道边界拟合直线，向下外推到十字区域
+// 十字补线：分别取十字入口（近端）和出口（远端）的边界，
+// 在入口和出口之间线性插值连接，形成平滑过渡的中线。
 static void cross_fill_borders(vision_track_result_t *res)
 {
-    int16_t y, break_y = -1;
-    uint8_t in_cross = 0, narrow_streak = 0;
-    uint16_t y_fit_end, y_fit_start;
+    int16_t y;
+    int16_t enter_y = -1;      // 十字入口（底部，近车端）
+    int16_t break_y = -1;      // 十字出口（顶部，远端）
+    uint8_t in_cross = 0;
+    uint8_t narrow_streak = 0;
+    uint16_t y_fit_start, y_fit_end;
     long kL_q10, bL_q10, kR_q10, bR_q10;
     static int16_t g_last_break_y = -1;
+    static int16_t g_last_enter_y = -1;
 
+    int16_t entry_left  = -1;
+    int16_t entry_right = -1;
+    int16_t exit_left   = -1;
+    int16_t exit_right  = -1;
+
+    // 第一遍扫描：从底向上，找出入口(enter_y)和出口(break_y)
     for (y = (int16_t)(VISION_H - 1); y >= 0; y--)
     {
-        int16_t l, r;
+        int16_t l = res->left[(uint16_t)y];
+        int16_t r = res->right[(uint16_t)y];
         uint16_t w;
 
-        l = res->left[(uint16_t)y];
-        r = res->right[(uint16_t)y];
         if (l < 0 || r < 0) continue;
 
         w = (uint16_t)(r - l + 1);
@@ -850,7 +860,10 @@ static void cross_fill_borders(vision_track_result_t *res)
             if (w > (uint16_t)VISION_CROSS_WIDE_TH_NUM &&
                 l <= VISION_EDGE_NEAR_TH &&
                 r >= (int16_t)(VISION_W - 1 - VISION_EDGE_NEAR_TH))
+            {
                 in_cross = 1;
+                enter_y = y;
+            }
         }
         else
         {
@@ -864,37 +877,101 @@ static void cross_fill_borders(vision_track_result_t *res)
         }
     }
 
+    // 没找到出口 → 放弃
     if (break_y < 0)
     {
         g_last_break_y = -1;
+        g_last_enter_y = -1;
         return;
     }
 
+    // 历史平滑
     if (g_last_break_y >= 0)
         break_y = (int16_t)((break_y + g_last_break_y * 3 + 2) / 4);
     g_last_break_y = break_y;
 
-    y_fit_end = (uint16_t)break_y;
-    if (y_fit_end <= 5) return;
+    if (g_last_enter_y >= 0)
+        enter_y = (int16_t)((enter_y + g_last_enter_y * 3 + 2) / 4);
+    g_last_enter_y = enter_y;
 
-    y_fit_start = (y_fit_end > 25) ? (uint16_t)(y_fit_end - 25) : 0;
-    y_fit_end = (uint16_t)(y_fit_end - 5);
-    if (y_fit_end <= y_fit_start) return;
-    if (!fit_line_x_of_y_q10(res->left,  y_fit_start, y_fit_end, -1, &kL_q10, &bL_q10)) return;
-    if (!fit_line_x_of_y_q10(res->right, y_fit_start, y_fit_end, -1, &kR_q10, &bR_q10)) return;
-
-    for (y = (int16_t)(break_y + 1); y < (int16_t)VISION_H; y++)
+    // 没找到入口，或十字太窄 → 退回旧逻辑（仅外推）
+    if (enter_y < 0 || enter_y <= break_y + 5)
     {
-        int16_t l = eval_line_q10(kL_q10, bL_q10, (uint16_t)y);
-        int16_t r = eval_line_q10(kR_q10, bR_q10, (uint16_t)y);
+        y_fit_end = (uint16_t)break_y;
+        if (y_fit_end <= 5) return;
+        y_fit_start = (y_fit_end > 25) ? (uint16_t)(y_fit_end - 25) : 0;
+        y_fit_end = (uint16_t)(y_fit_end - 5);
+        if (y_fit_end <= y_fit_start) return;
+        if (!fit_line_x_of_y_q10(res->left,  y_fit_start, y_fit_end, -1, &kL_q10, &bL_q10)) return;
+        if (!fit_line_x_of_y_q10(res->right, y_fit_start, y_fit_end, -1, &kR_q10, &bR_q10)) return;
 
-        l = clamp_i16(l, 0, (int16_t)(VISION_W - 1));
-        r = clamp_i16(r, 0, (int16_t)(VISION_W - 1));
-        if (l > r) { int16_t t = l; l = r; r = t; }
+        for (y = (int16_t)(break_y + 1); y < (int16_t)VISION_H; y++)
+        {
+            int16_t l = eval_line_q10(kL_q10, bL_q10, (uint16_t)y);
+            int16_t r = eval_line_q10(kR_q10, bR_q10, (uint16_t)y);
+            l = clamp_i16(l, 0, (int16_t)(VISION_W - 1));
+            r = clamp_i16(r, 0, (int16_t)(VISION_W - 1));
+            if (l > r) { int16_t t = l; l = r; r = t; }
+            res->left[(uint16_t)y]  = l;
+            res->right[(uint16_t)y] = r;
+            res->mid[(uint16_t)y]   = (int16_t)((l + r) / 2);
+        }
+        return;
+    }
 
-        res->left[(uint16_t)y]  = l;
-        res->right[(uint16_t)y] = r;
-        res->mid[(uint16_t)y]   = (int16_t)((l + r) / 2);
+    // ====== 双向插值：入口 ←→ 出口 ======
+
+    // 取入口边：enter_y 下方最近的有效行（近车头，数据可靠）
+    {
+        int16_t ey;
+        for (ey = (int16_t)(enter_y + 1); ey < (int16_t)VISION_H; ey++)
+        {
+            if (res->left[(uint16_t)ey] >= 0 && res->right[(uint16_t)ey] >= 0)
+            {
+                entry_left  = res->left[(uint16_t)ey];
+                entry_right = res->right[(uint16_t)ey];
+                break;
+            }
+        }
+        if (entry_left < 0) return;
+    }
+
+    // 取出边：用 break_y 上方的边做直线拟合 → 在 break_y 处求值
+    {
+        y_fit_end = (uint16_t)break_y;
+        if (y_fit_end <= 5) return;
+        y_fit_start = (y_fit_end > 25) ? (uint16_t)(y_fit_end - 25) : 0;
+        y_fit_end = (uint16_t)(y_fit_end - 5);
+        if (y_fit_end <= y_fit_start) return;
+        if (!fit_line_x_of_y_q10(res->left,  y_fit_start, y_fit_end, -1, &kL_q10, &bL_q10)) return;
+        if (!fit_line_x_of_y_q10(res->right, y_fit_start, y_fit_end, -1, &kR_q10, &bR_q10)) return;
+
+        exit_left  = eval_line_q10(kL_q10, bL_q10, (uint16_t)break_y);
+        exit_right = eval_line_q10(kR_q10, bR_q10, (uint16_t)break_y);
+        exit_left  = clamp_i16(exit_left,  0, (int16_t)(VISION_W - 1));
+        exit_right = clamp_i16(exit_right, 0, (int16_t)(VISION_W - 1));
+        if (exit_left > exit_right)
+            { int16_t t = exit_left; exit_left = exit_right; exit_right = t; }
+    }
+
+    // 在入口(enter_y) 和 出口(break_y) 之间线性插值
+    {
+        uint16_t span = (uint16_t)(enter_y - break_y);
+
+        for (y = (int16_t)(break_y + 1); y < enter_y; y++)
+        {
+            uint16_t t = (uint16_t)(y - break_y);
+            int16_t l = exit_left  + (int16_t)(((int32_t)(entry_left  - exit_left)  * t) / span);
+            int16_t r = exit_right + (int16_t)(((int32_t)(entry_right - exit_right) * t) / span);
+
+            l = clamp_i16(l, 0, (int16_t)(VISION_W - 1));
+            r = clamp_i16(r, 0, (int16_t)(VISION_W - 1));
+            if (l > r) { int16_t tmp = l; l = r; r = tmp; }
+
+            res->left[(uint16_t)y]  = l;
+            res->right[(uint16_t)y] = r;
+            res->mid[(uint16_t)y]   = (int16_t)((l + r) / 2);
+        }
     }
 }
 

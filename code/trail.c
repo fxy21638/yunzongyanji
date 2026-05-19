@@ -207,8 +207,8 @@ static int16_t detect_cross_break_row(void)
     uint8_t in_cross = 0;
     uint8_t narrow_streak = 0;
 
-    base_w = average_lane_width((uint16_t)(MT9V034_HEIGHT / 3),
-                                (uint16_t)(MT9V034_HEIGHT / 2));
+    base_w = average_lane_width((uint16_t)(MT9V034_HEIGHT - 25),
+                                (uint16_t)(MT9V034_HEIGHT - 5));
     if (base_w < 8)
     {
         return -1;
@@ -219,7 +219,7 @@ static int16_t detect_cross_break_row(void)
         if (g_track.left[(uint16_t)y] >= 0 && g_track.right[(uint16_t)y] >= 0)
         {
             int16_t w = (int16_t)(g_track.right[(uint16_t)y] - g_track.left[(uint16_t)y] + 1);
-            if (w > base_w + base_w / 2)
+            if (w > base_w + base_w / 3)
             {
                 if (!in_cross)
                 {
@@ -448,7 +448,10 @@ void track_handle(void)
     if (current_element == CROSS)
     {
         broken_flag_clear();
-        track_midpoint_target = CENTER_POINT;
+        if (g_track.center_x >= 0)
+            track_midpoint_target = clamp_center_to_target(g_track.center_x);
+        else
+            track_midpoint_target = CENTER_POINT;
         track_element = CROSS;
         cross_exit_hold = 3;
     }
@@ -491,16 +494,8 @@ void track_handle(void)
 
     if (track_element != BROKEN_RODE && track_element != NONE)
     {
-        if (track_element == CROSS)
-        {
-            uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P;
-            track_midpoint_target = (uint8_t)((smooth + 1) / 2);
-        }
-        else
-        {
-            uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
-            track_midpoint_target = (uint8_t)((smooth + 2) / 4);
-        }
+        uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
+        track_midpoint_target = (uint8_t)((smooth + 2) / 4);
     }
 
     report_track_element_if_changed();
