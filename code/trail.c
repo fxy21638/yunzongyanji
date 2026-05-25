@@ -412,21 +412,21 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
 
 void track_straight_target(uint8_t position)
 {
-    position = position;
+    (void)position;
     straight_target = plan_straight_center();
     track_midpoint_target = straight_target;
 }
 
 static void report_track_element_if_changed(void)
 {
-    if (track_element != track_element_P)
-    {
-        printf("ELEMENT:%s center:%u err:%d valid:%u\r\n",
-               track_element_name(track_element),
-               track_midpoint_target,
-               g_track.error_x,
-               g_track.valid_rows);
-    }
+    //if (track_element != track_element_P)
+    //{
+    //    printf("ELEMENT:%s center:%u err:%d valid:%u\r\n",
+    //           track_element_name(track_element),
+    //           track_midpoint_target,
+    //           g_track.error_x,
+    //           g_track.valid_rows);
+    //}
 }
 
 void track_handle(void)
@@ -494,7 +494,16 @@ void track_handle(void)
 
     if (track_element != BROKEN_RODE && track_element != NONE)
     {
-        uint16_t smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
+        int16_t jump;
+        uint16_t smooth;
+
+        jump = (int16_t)track_midpoint_target - (int16_t)track_midpoint_target_P;
+        if (jump > 12)
+            track_midpoint_target = (uint8_t)((int16_t)track_midpoint_target_P + 12);
+        else if (jump < -12)
+            track_midpoint_target = (uint8_t)((int16_t)track_midpoint_target_P - 12);
+
+        smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
         track_midpoint_target = (uint8_t)((smooth + 2) / 4);
     }
 

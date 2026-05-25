@@ -9,7 +9,7 @@
 #include "pid.h"
 
 #define change_kib 4
-#define MOTOR_SPEED_LIMIT 4000
+#define MOTOR_SPEED_LIMIT 1000
 #define MOTOR_POSITION_LIMIT 1000
 #define MOTOR_ANGLE_LIMIT 1000
 #define STEER_OUTPUT_LIMIT 20.0f

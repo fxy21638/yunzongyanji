@@ -5,9 +5,9 @@
 #include "motor.h"
 #include "vision.h"        // g_track, g_track_valid
 
-float speed_base = 80;
+float speed_base = 45;
 
-#define FIXED_SPEED_DEBUG 1
+#define FIXED_SPEED_DEBUG 0
 #define FIXED_PWM_DUTY 600
 float gyro_target = 0;
 float gyro_control = 60;
@@ -76,8 +76,28 @@ void motor_speed_control(void)
     speed_gain_r = IncrementalPID_Calculate(&speed_pid_r, speed_base - encoder_data_dir[1]);
     speed_r += speed_gain_r;
 
-    speed_l = SATURATE(speed_l, -MOTOR_SPEED_LIMIT, MOTOR_SPEED_LIMIT);
-    speed_r = SATURATE(speed_r, -MOTOR_SPEED_LIMIT, MOTOR_SPEED_LIMIT);
+    // Anti-windup: clamp and prevent further accumulation in saturation direction
+    if (speed_l > MOTOR_SPEED_LIMIT)
+    {
+        speed_l = MOTOR_SPEED_LIMIT;
+        if (speed_gain_l > 0) speed_l -= speed_gain_l;
+    }
+    else if (speed_l < -MOTOR_SPEED_LIMIT)
+    {
+        speed_l = -MOTOR_SPEED_LIMIT;
+        if (speed_gain_l < 0) speed_l -= speed_gain_l;
+    }
+
+    if (speed_r > MOTOR_SPEED_LIMIT)
+    {
+        speed_r = MOTOR_SPEED_LIMIT;
+        if (speed_gain_r > 0) speed_r -= speed_gain_r;
+    }
+    else if (speed_r < -MOTOR_SPEED_LIMIT)
+    {
+        speed_r = -MOTOR_SPEED_LIMIT;
+        if (speed_gain_r < 0) speed_r -= speed_gain_r;
+    }
 
     speed_now_l = speed_l;
     speed_now_r = speed_r;

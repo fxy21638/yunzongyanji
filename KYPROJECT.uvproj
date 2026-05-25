@@ -444,6 +444,16 @@
               <FileType>5</FileType>
               <FilePath>.\code\vision_track.h</FilePath>
             </File>
+            <File>
+              <FileName>speed_tune.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\speed_tune.c</FilePath>
+            </File>
+            <File>
+              <FileName>speed_tune.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\speed_tune.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
