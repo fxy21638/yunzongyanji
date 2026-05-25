@@ -18,8 +18,8 @@ void encoder_task(void)
     enc1_value = encoder_read(ENC1_PWM);
     enc2_value = encoder_read(ENC2_PWM);
 
-    encoder_data_dir[0] = enc1_value - last_enc1_value;
-    encoder_data_dir[1] = enc2_value - last_enc2_value;
+    encoder_data_dir[0] = last_enc1_value - enc1_value;
+    encoder_data_dir[1] = last_enc2_value - enc2_value;
 
     last_enc1_value = enc1_value;
     last_enc2_value = enc2_value;

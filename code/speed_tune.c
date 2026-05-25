@@ -5,17 +5,17 @@
 #define TUNE_SEND_INTERVAL 4
 
 // Step-test mode: set to 1 to enable square-wave target speed toggling.
-#define TUNE_STEP_ENABLE    0
-#define TUNE_STEP_INTERVAL  80
-#define TUNE_STEP_LOW       40.0f
-#define TUNE_STEP_HIGH      100.0f
+#define TUNE_STEP_ENABLE 0
+#define TUNE_STEP_INTERVAL 80
+#define TUNE_STEP_LOW 40.0f
+#define TUNE_STEP_HIGH 100.0f
 
 void speed_tune_send(void)
 {
     static uint8_t counter = 0;
 #if TUNE_STEP_ENABLE
     static uint16_t step_cnt = 0;
-    static uint8_t  step_state = 0;
+    static uint8_t step_state = 0;
 #endif
     float target;
 
