@@ -59,12 +59,12 @@ void Set_PWM(int16_t left, int16_t right)
 
     if (right >= 0)
     {
-        gpio_write_pin(M2_DIR, 0);
+        gpio_write_pin(M2_DIR, 1);
         pwm_set_duty(M2_PWM, right);
     }
     else
     {
-        gpio_write_pin(M2_DIR, 1);
+        gpio_write_pin(M2_DIR, 0);
         pwm_set_duty(M2_PWM, -right);
     }
 }

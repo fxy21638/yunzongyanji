@@ -43,7 +43,7 @@ void debug_main(void)
 //        return;
 //    }
 
-    //vofa_image_task();
+    vofa_image_task();
     track_handle();
-    speed_tune_send();
+    //speed_tune_send();
 }

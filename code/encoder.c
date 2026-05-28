@@ -1,5 +1,8 @@
-﻿#include "encoder.h"
+#include "encoder.h"
 #include "main.h"
+
+#define LEFT_ENCODER_SIGN (-1)
+#define RIGHT_ENCODER_SIGN (-1)
 
 int16_t enc1_value = 0;
 int16_t enc2_value = 0;
@@ -18,8 +21,8 @@ void encoder_task(void)
     enc1_value = encoder_read(ENC1_PWM);
     enc2_value = encoder_read(ENC2_PWM);
 
-    encoder_data_dir[0] = last_enc1_value - enc1_value;
-    encoder_data_dir[1] = last_enc2_value - enc2_value;
+    encoder_data_dir[0] = (last_enc1_value - enc1_value) * LEFT_ENCODER_SIGN;
+    encoder_data_dir[1] = (last_enc2_value - enc2_value) * RIGHT_ENCODER_SIGN;
 
     last_enc1_value = enc1_value;
     last_enc2_value = enc2_value;

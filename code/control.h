@@ -9,7 +9,7 @@
 #include "pid.h"
 
 #define change_kib 4
-#define MOTOR_SPEED_LIMIT 1000
+#define MOTOR_SPEED_LIMIT 800
 #define MOTOR_POSITION_LIMIT 1000
 #define MOTOR_ANGLE_LIMIT 1000
 #define STEER_OUTPUT_LIMIT 20.0f
@@ -27,6 +27,7 @@ extern float speed_now_l;
 extern float speed_now_r;
 
 void control_Init(void);
+void control_set_speed_tune_mode(uint8_t enable);
 void all_control(void);
 void motor_speed_control(void);
 void steering_control(void);

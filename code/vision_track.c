@@ -396,51 +396,6 @@ static void find_widest_run_0(const uint8_t *row, uint16_t w, int16_t *out_l, in
         { *out_l = best_l; *out_r = best_r; }
 }
 
-// 找一行中中心最接近 target 的连续 0（赛道像素）段，用于弯道处保持中线连续性
-static void find_nearest_run_0(const uint8_t *row, uint16_t w, int16_t target,
-                                int16_t *out_l, int16_t *out_r)
-{
-    uint16_t x = 0;
-    uint16_t best_dist = 0xFFFF;
-    int16_t  best_l = -1, best_r = -1;
-
-    if (target < 0 || target >= (int16_t)w)
-    {
-        find_widest_run_0(row, w, out_l, out_r);
-        return;
-    }
-
-    while (x < w)
-    {
-        if (row[x] == 0)
-        {
-            uint16_t l, r, len;
-            int16_t center;
-            uint16_t dist;
-            l = x;
-            while (x < w && row[x] == 0) x++;
-            r = (uint16_t)(x - 1);
-            len = (uint16_t)(r - l + 1);
-            if (len >= VISION_MIN_RUN_LEN)
-            {
-                center = (int16_t)((l + r) / 2);
-                dist = (target >= center) ? (uint16_t)(target - center)
-                                          : (uint16_t)(center - target);
-                if (dist < best_dist)
-                {
-                    best_dist = dist;
-                    best_l = (int16_t)l;
-                    best_r = (int16_t)r;
-                }
-            }
-        }
-        else { x++; }
-    }
-
-    *out_l = best_l;
-    *out_r = best_r;
-}
-
 static uint8_t is_track_pixel(const uint8_t *bin, int16_t x, int16_t y)
 {
     return (bin_at(bin, x, y) == 0);
@@ -591,7 +546,6 @@ static uint8_t extract_edges_8neighbor(const uint8_t *bin, vision_track_result_t
 static void extract_edges(const uint8_t *bin, vision_track_result_t *res)
 {
     int16_t last_mid = (int16_t)(VISION_W / 2);
-    int16_t last_w  = (int16_t)(VISION_W / 3);
     uint16_t y;
 
     res->valid_rows = 0;
@@ -616,42 +570,16 @@ static void extract_edges(const uint8_t *bin, vision_track_result_t *res)
         }
 
         if (l < 0)
-            find_nearest_run_0(row, VISION_W, last_mid, &l, &r);
+            find_widest_run_0(row, VISION_W, &l, &r);
 
         if (l >= 0)
         {
-            // 段触及图像边界时，该侧不是真实车道边界，标记为未知
-            // 后续 fill_missing_edges_by_width 用中值道宽估算
-            if (l <= VISION_EDGE_NEAR_TH)
-                l = -1;
-            if (r >= (int16_t)(VISION_W - 1 - VISION_EDGE_NEAR_TH))
-                r = -1;
-
+            int16_t m = (int16_t)((l + r) / 2);
             res->left[y]  = l;
             res->right[y] = r;
-
-            if (l >= 0 && r >= 0)
-            {
-                int16_t m = (int16_t)((l + r) / 2);
-                res->mid[y] = m;
-                last_mid = m;
-                last_w = (int16_t)(r - l + 1);
-                res->valid_rows++;
-            }
-            else if (l >= 0)
-            {
-                res->mid[y] = -1;
-                last_mid = (int16_t)(l + last_w / 2);
-            }
-            else if (r >= 0)
-            {
-                res->mid[y] = -1;
-                last_mid = (int16_t)(r - last_w / 2);
-            }
-            else
-            {
-                res->mid[y] = -1;
-            }
+            res->mid[y]   = m;
+            last_mid = m;
+            res->valid_rows++;
         }
         if (y == 0) break;
     }

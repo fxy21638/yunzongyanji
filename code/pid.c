@@ -1,8 +1,8 @@
 #include "main.h"
 
 #if (CASCADE_PID == 1)
-IncrementalPID speed_pid_l = {1.37f, 0.20f, 0.0f, 0.0f};
-IncrementalPID speed_pid_r = {1.38f, 0.16f, 0.0f, 0.0f};
+IncrementalPID speed_pid_l = {0.45f, 0.07f, 0.0f, 0.0f};
+IncrementalPID speed_pid_r = {0.42f, 0.05f, 0.0f, 0.0f};
 PositionalPID pid_pos = {0.40f, 0.35f, 0.0f};
 PositionalPID pid_gyro = {1.4f, 3.4f, 0.0f};
 #elif (CASCADE_PID == 2)

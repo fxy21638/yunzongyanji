@@ -3,11 +3,11 @@
 #include "icm.h"
 #include "servo.h"
 #include "motor.h"
-#include "vision.h"        // g_track, g_track_valid
+#include "vision.h" // g_track, g_track_valid
 
 float speed_base = 45;
 
-#define FIXED_SPEED_DEBUG 0
+#define FIXED_SPEED_DEBUG 1
 #define FIXED_PWM_DUTY 600
 float gyro_target = 0;
 float gyro_control = 60;
@@ -17,10 +17,19 @@ float speed_l = 0;
 float speed_r = 0;
 float speed_now_l = 0;
 float speed_now_r = 0;
+static uint8_t speed_tune_mode = 0;
 
 static void control_timer_callback(void)
 {
     encoder_task();
+
+    if (speed_tune_mode)
+    {
+        motor_speed_control();
+        servo_set_wheel_angle(0.0f);
+        Set_PWM((int16_t)speed_now_l, (int16_t)speed_now_r);
+        return;
+    }
 
     if (track_element == NONE)
     {
@@ -43,6 +52,17 @@ static void control_timer_callback(void)
 void control_Init(void)
 {
     timer_init_ms(TIM_1, 5, control_timer_callback);
+}
+
+void control_set_speed_tune_mode(uint8_t enable)
+{
+    speed_tune_mode = enable;
+
+    if (!enable)
+        return;
+
+    motor_clear();
+    servo_set_wheel_angle(0.0f);
 }
 
 void all_control(void)
@@ -80,23 +100,27 @@ void motor_speed_control(void)
     if (speed_l > MOTOR_SPEED_LIMIT)
     {
         speed_l = MOTOR_SPEED_LIMIT;
-        if (speed_gain_l > 0) speed_l -= speed_gain_l;
+        if (speed_gain_l > 0)
+            speed_l -= speed_gain_l;
     }
     else if (speed_l < -MOTOR_SPEED_LIMIT)
     {
         speed_l = -MOTOR_SPEED_LIMIT;
-        if (speed_gain_l < 0) speed_l -= speed_gain_l;
+        if (speed_gain_l < 0)
+            speed_l -= speed_gain_l;
     }
 
     if (speed_r > MOTOR_SPEED_LIMIT)
     {
         speed_r = MOTOR_SPEED_LIMIT;
-        if (speed_gain_r > 0) speed_r -= speed_gain_r;
+        if (speed_gain_r > 0)
+            speed_r -= speed_gain_r;
     }
     else if (speed_r < -MOTOR_SPEED_LIMIT)
     {
         speed_r = -MOTOR_SPEED_LIMIT;
-        if (speed_gain_r < 0) speed_r -= speed_gain_r;
+        if (speed_gain_r < 0)
+            speed_r -= speed_gain_r;
     }
 
     speed_now_l = speed_l;
@@ -124,28 +148,30 @@ void steering_control(void)
         last_r = -1;
         for (y = (uint16_t)(MT9V034_HEIGHT / 2); y < MT9V034_HEIGHT; y++)
         {
-            if (g_track.left[y] >= 0)  last_l = g_track.left[y];
-            if (g_track.right[y] >= 0) last_r = g_track.right[y];
+            if (g_track.left[y] >= 0)
+                last_l = g_track.left[y];
+            if (g_track.right[y] >= 0)
+                last_r = g_track.right[y];
         }
 
         if (last_l >= 0 && last_r < 0)
         {
             // 只有左边有数据 → 向左偏了 → 强行向左转
             emergency = 1;
-            steer_output = STEER_OUTPUT_LIMIT;         // 满舵左转
+            steer_output = STEER_OUTPUT_LIMIT; // 满舵左转
         }
         else if (last_r >= 0 && last_l < 0)
         {
             // 只有右边有数据 → 向右偏了 → 强行向右转
             emergency = 2;
-            steer_output = -STEER_OUTPUT_LIMIT;        // 满舵右转
+            steer_output = -STEER_OUTPUT_LIMIT; // 满舵右转
         }
         else if (last_l < 0 && last_r < 0)
         {
             // 两边都没数据 → 完全丢线 → 保持上次方向
             static int8_t last_emergency_dir = 0;
             if (last_emergency_dir == 0)
-                last_emergency_dir = 1;  // 默认左转
+                last_emergency_dir = 1; // 默认左转
             emergency = 3;
             steer_output = (float)last_emergency_dir * STEER_OUTPUT_LIMIT * 0.5f;
         }
