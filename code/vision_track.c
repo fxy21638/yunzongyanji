@@ -681,6 +681,8 @@ static void fill_missing_edges_by_width(vision_track_result_t *res)
     int16_t widths[VISION_H];
     uint16_t valid_cnt = 0;
     int16_t med_w;
+    int16_t margin;
+    int16_t boundary_r;
 
     for (y = 0; y < VISION_H; y++)
     {
@@ -698,7 +700,8 @@ static void fill_missing_edges_by_width(vision_track_result_t *res)
     med_w = widths[valid_cnt / 2];
     if (med_w < (int16_t)VISION_MIN_RUN_LEN) return;
 
-    for (y = (uint16_t)(VISION_H / 3); y < VISION_H; y++)
+    // 补全所有行（不只底部 2/3）中缺少单边的情况
+    for (y = 0; y < VISION_H; y++)
     {
         if (res->left[y] >= 0 && res->right[y] >= 0) continue;
 
@@ -713,6 +716,227 @@ static void fill_missing_edges_by_width(vision_track_result_t *res)
             int16_t l = (int16_t)(res->right[y] - med_w);
             if (l >= 0)
                 { res->left[y] = l; res->mid[y] = (int16_t)((l + res->right[y]) / 2); res->valid_rows++; }
+        }
+    }
+
+    // 顶部外推：顶部连续缺双边若干行时，从首个有效行区域的趋势向上外推
+    {
+        uint16_t first_valid;
+        uint16_t fit_end;
+        int16_t clean_top;
+        long kL_q10, bL_q10, kR_q10, bR_q10;
+
+        first_valid = VISION_H;
+        for (y = 0; y < VISION_H; y++)
+        {
+            if (res->left[y] >= 0 && res->right[y] >= 0)
+                { first_valid = y; break; }
+        }
+        if (first_valid == 0 || first_valid >= VISION_H)
+            return;
+
+        fit_end = first_valid + 25u;
+        if (fit_end >= VISION_H) fit_end = VISION_H - 1u;
+
+        margin     = (int16_t)VISION_EDGE_NEAR_TH;
+        boundary_r = (int16_t)(VISION_W - 1u - (uint16_t)margin);
+
+        // 找 fit 区域内第一条干净行
+        clean_top = -1;
+        {
+            uint16_t cy;
+            for (cy = first_valid; cy <= fit_end; cy++)
+            {
+                int16_t cl = res->left[cy];
+                int16_t cr = res->right[cy];
+                if (cl >= 0 && cr >= 0 && cl > margin && cr < boundary_r)
+                    { clean_top = (int16_t)cy; break; }
+            }
+        }
+        if (clean_top < 0) return;
+
+        if (!fit_line_x_of_y_q10(res->left,  (uint16_t)clean_top, fit_end, -1, &kL_q10, &bL_q10))
+            return;
+        if (!fit_line_x_of_y_q10(res->right, (uint16_t)clean_top, fit_end, -1, &kR_q10, &bR_q10))
+            return;
+
+        for (y = 0; y < first_valid; y++)
+        {
+            int16_t fl, fr;
+            if (res->left[y] >= 0 && res->right[y] >= 0) continue;
+            fl = eval_line_q10(kL_q10, bL_q10, y);
+            fr = eval_line_q10(kR_q10, bR_q10, y);
+            fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
+            fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
+            if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
+            if (fl < fr)
+            {
+                res->left[y]  = fl;
+                res->right[y] = fr;
+                res->mid[y]   = (int16_t)((fl + fr) / 2);
+                res->valid_rows++;
+            }
+        }
+    }
+}
+
+// 通用边界修复：找到单侧边碰图像边界的连续区域，从邻近干净行外推修正。
+// 适用于右转、环岛等非十字路口场景，避免图像边界被误认为赛道边缘。
+static void fix_boundary_zones(vision_track_result_t *res)
+{
+    uint16_t y;
+    int16_t margin;
+    int16_t boundary_r;
+
+    margin     = (int16_t)VISION_EDGE_NEAR_TH;
+    boundary_r = (int16_t)(VISION_W - 1u - (uint16_t)margin);
+
+    y = 0;
+    while (y < VISION_H)
+    {
+        uint16_t zone_start, zone_end;
+        uint16_t zone_len;
+        uint8_t locked_side; // 'L' 或 'R'
+        uint8_t touches_left, touches_right;
+        int16_t l, r;
+        int16_t ref_below_l, ref_below_r;
+        int16_t ref_above_l, ref_above_r;
+        int16_t ref_w;
+        uint16_t yy;
+
+        l = res->left[y];
+        r = res->right[y];
+        if (!(l >= 0 && r >= 0)) { y++; continue; }
+
+        touches_left  = (uint8_t)(l <= margin);
+        touches_right = (uint8_t)(r >= boundary_r);
+        if (!((touches_left && !touches_right) || (touches_right && !touches_left)))
+            { y++; continue; }
+
+        locked_side = touches_right ? 'R' : 'L';
+        zone_start  = y;
+
+        while (y < VISION_H)
+        {
+            int16_t l2 = res->left[y];
+            int16_t r2 = res->right[y];
+            if (!(l2 >= 0 && r2 >= 0)) break;
+            if (locked_side == 'R')
+            {
+                if (r2 < boundary_r) break;
+                if (l2 <= margin)    break;
+            }
+            else
+            {
+                if (l2 > margin)          break;
+                if (r2 >= boundary_r)     break;
+            }
+            y++;
+        }
+        zone_end = y;
+        zone_len = (uint16_t)(zone_end - zone_start);
+
+        if (zone_len < 3 || zone_start > (uint16_t)(VISION_H - 10))
+            continue;
+
+        // 找上下干净参考行
+        ref_above_l = -1; ref_above_r = -1;
+        for (yy = zone_end; yy < (uint16_t)(zone_end + 15) && yy < VISION_H; yy++)
+        {
+            int16_t la = res->left[yy];
+            int16_t ra = res->right[yy];
+            if (la >= 0 && ra >= 0 && la > margin && ra < boundary_r)
+                { ref_above_l = la; ref_above_r = ra; break; }
+        }
+
+        ref_below_l = -1; ref_below_r = -1;
+        {
+            int16_t ry;
+            for (ry = (int16_t)zone_start - 1; ry >= 0 && ry >= (int16_t)(zone_start - 15); ry--)
+            {
+                int16_t lb = res->left[(uint16_t)ry];
+                int16_t rb = res->right[(uint16_t)ry];
+                if (lb >= 0 && rb >= 0 && lb > margin && rb < boundary_r)
+                    { ref_below_l = lb; ref_below_r = rb; break; }
+            }
+        }
+
+        if (ref_below_l < 0 && ref_above_l < 0) continue;
+
+        // 线性插值（有上下参考）或外推（只有一侧参考）
+        if (ref_below_l >= 0 && ref_above_l >= 0)
+        {
+            uint16_t zi;
+            long t_q10;
+            long numer;
+            for (zi = 0; zi < zone_len; zi++)
+            {
+                yy = zone_start + zi;
+                t_q10 = ((long)(zi + 1) << 10) / (long)(zone_len + 1);
+                if (locked_side == 'R')
+                {
+                    int16_t new_r;
+                    numer = (long)(ref_above_r - ref_below_r) * t_q10;
+                    new_r = (int16_t)(ref_below_r + (numer >> 10));
+                    new_r = clamp_i16(new_r, 0, (int16_t)(VISION_W - 1));
+                    if (res->left[yy] < new_r)
+                    {
+                        res->right[yy] = new_r;
+                        res->mid[yy]   = (int16_t)((res->left[yy] + new_r) / 2);
+                    }
+                }
+                else
+                {
+                    int16_t new_l;
+                    numer = (long)(ref_above_l - ref_below_l) * t_q10;
+                    new_l = (int16_t)(ref_below_l + (numer >> 10));
+                    new_l = clamp_i16(new_l, 0, (int16_t)(VISION_W - 1));
+                    if (new_l < res->right[yy])
+                    {
+                        res->left[yy] = new_l;
+                        res->mid[yy]  = (int16_t)((new_l + res->right[yy]) / 2);
+                    }
+                }
+            }
+        }
+        else if (ref_below_l >= 0)
+        {
+            ref_w = (int16_t)(ref_below_r - ref_below_l + 1);
+            for (yy = zone_start; yy < zone_end; yy++)
+            {
+                if (locked_side == 'R')
+                {
+                    int16_t new_r = (int16_t)(res->left[yy] + ref_w);
+                    if (new_r < (int16_t)VISION_W)
+                        { res->right[yy] = new_r; res->mid[yy] = (int16_t)((res->left[yy] + new_r) / 2); }
+                }
+                else
+                {
+                    int16_t new_l = (int16_t)(res->right[yy] - ref_w);
+                    if (new_l >= 0)
+                        { res->left[yy] = new_l; res->mid[yy] = (int16_t)((new_l + res->right[yy]) / 2); }
+                }
+            }
+        }
+        else
+        {
+            // 只有上方参考（区域在图像顶部）
+            ref_w = (int16_t)(ref_above_r - ref_above_l + 1);
+            for (yy = zone_start; yy < zone_end; yy++)
+            {
+                if (locked_side == 'R')
+                {
+                    int16_t new_r = (int16_t)(res->left[yy] + ref_w);
+                    if (new_r < (int16_t)VISION_W)
+                        { res->right[yy] = new_r; res->mid[yy] = (int16_t)((res->left[yy] + new_r) / 2); }
+                }
+                else
+                {
+                    int16_t new_l = (int16_t)(res->right[yy] - ref_w);
+                    if (new_l >= 0)
+                        { res->left[yy] = new_l; res->mid[yy] = (int16_t)((new_l + res->right[yy]) / 2); }
+                }
+            }
         }
     }
 }
@@ -739,9 +963,11 @@ static void classify_feature(const vision_track_result_t *res, vision_track_resu
 
         w = (uint16_t)(r - l + 1);
 
+        // CROSS uses wider margin (4px) because camera vignette creates fake
+        // track edges at x=183-187 that must be treated as boundary-touching
         if (w > (uint16_t)VISION_CROSS_WIDE_TH_NUM &&
-            l <= VISION_EDGE_NEAR_TH &&
-            r >= (int16_t)(VISION_W - 1 - VISION_EDGE_NEAR_TH))
+            (l <= 4 ||
+             r >= (int16_t)(VISION_W - 1 - 4)))
             cross_cnt++;
 
         if (w > (uint16_t)(VISION_W * 6 / 10))
@@ -826,152 +1052,225 @@ static int16_t eval_line_q10(long k_q10, long b_q10, uint16_t y)
     else            return (int16_t)((x_q10 - (1 << 9)) >> 10);
 }
 
-// 十字补线：分别取十字入口（近端）和出口（远端）的边界，
-// 在入口和出口之间线性插值连接，形成平滑过渡的中线。
-static void cross_fill_borders(vision_track_result_t *res)
+// 十字路口处理：在稳定锚点区域拟合赛道左右边缘的直线趋势，
+// 然后将碰图像边界的行和偏离趋势过远的行替换为趋势投影。
+// 这样边缘和中线会沿着赛道的自然趋势平滑穿过十字路口，
+// 而不会被十字臂误导到图像边界上。
+static void project_edges_through_cross(vision_track_result_t *res)
 {
-    int16_t y;
-    int16_t enter_y = -1;      // 十字入口（底部，近车端）
-    int16_t break_y = -1;      // 十字出口（顶部，远端）
-    uint8_t in_cross = 0;
-    uint8_t narrow_streak = 0;
-    uint16_t y_fit_start, y_fit_end;
+    uint16_t y;
+    uint16_t anchor_y0, anchor_y1;
+    int16_t margin;
+    int16_t boundary_r;
     long kL_q10, bL_q10, kR_q10, bR_q10;
-    static int16_t g_last_break_y = -1;
-    static int16_t g_last_enter_y = -1;
 
-    int16_t entry_left  = -1;
-    int16_t entry_right = -1;
-    int16_t exit_left   = -1;
-    int16_t exit_right  = -1;
-
-    // 第一遍扫描：从底向上，找出入口(enter_y)和出口(break_y)
-    for (y = (int16_t)(VISION_H - 1); y >= 0; y--)
-    {
-        int16_t l = res->left[(uint16_t)y];
-        int16_t r = res->right[(uint16_t)y];
-        uint16_t w;
-
-        if (l < 0 || r < 0) continue;
-
-        w = (uint16_t)(r - l + 1);
-        if (!in_cross)
-        {
-            if (w > (uint16_t)VISION_CROSS_WIDE_TH_NUM &&
-                l <= VISION_EDGE_NEAR_TH &&
-                r >= (int16_t)(VISION_W - 1 - VISION_EDGE_NEAR_TH))
-            {
-                in_cross = 1;
-                enter_y = y;
-            }
-        }
-        else
-        {
-            if (w <= (uint16_t)VISION_CROSS_END_TH_NUM)
-            {
-                narrow_streak++;
-                if (narrow_streak >= 3)
-                    { break_y = (int16_t)(y + narrow_streak - 1); break; }
-            }
-            else { narrow_streak = 0; }
-        }
-    }
-
-    // 没找到出口 → 放弃
-    if (break_y < 0)
-    {
-        g_last_break_y = -1;
-        g_last_enter_y = -1;
+    if (res->feature != VISION_FEATURE_CROSS)
         return;
-    }
 
-    // 历史平滑
-    if (g_last_break_y >= 0)
-        break_y = (int16_t)((break_y + g_last_break_y * 3 + 2) / 4);
-    g_last_break_y = break_y;
+    // Use wider margin (4px) than VISION_EDGE_NEAR_TH=2 to catch vignette
+    margin     = (int16_t)4;
+    boundary_r = (int16_t)(VISION_W - 1u - 4u);
 
-    if (g_last_enter_y >= 0)
-        enter_y = (int16_t)((enter_y + g_last_enter_y * 3 + 2) / 4);
-    g_last_enter_y = enter_y;
-
-    // 没找到入口，或十字太窄 → 退回旧逻辑（仅外推）
-    if (enter_y < 0 || enter_y <= break_y + 5)
+    // 1. 找锚点区域：取最大连续块，排除孤立行（如顶部十字臂残余）
     {
-        y_fit_end = (uint16_t)break_y;
-        if (y_fit_end <= 5) return;
-        y_fit_start = (y_fit_end > 25) ? (uint16_t)(y_fit_end - 25) : 0;
-        y_fit_end = (uint16_t)(y_fit_end - 5);
-        if (y_fit_end <= y_fit_start) return;
-        if (!fit_line_x_of_y_q10(res->left,  y_fit_start, y_fit_end, -1, &kL_q10, &bL_q10)) return;
-        if (!fit_line_x_of_y_q10(res->right, y_fit_start, y_fit_end, -1, &kR_q10, &bR_q10)) return;
+        uint16_t best_y0, best_y1, best_len;
+        uint16_t cur_y0, cur_len;
+        uint8_t in_block;
 
-        for (y = (int16_t)(break_y + 1); y < (int16_t)VISION_H; y++)
+        best_y0 = 0; best_y1 = 0; best_len = 0;
+        cur_y0 = 0; cur_len = 0;
+        in_block = 0;
+
+        for (y = 0; y < VISION_H; y++)
         {
-            int16_t l = eval_line_q10(kL_q10, bL_q10, (uint16_t)y);
-            int16_t r = eval_line_q10(kR_q10, bR_q10, (uint16_t)y);
-            l = clamp_i16(l, 0, (int16_t)(VISION_W - 1));
-            r = clamp_i16(r, 0, (int16_t)(VISION_W - 1));
-            if (l > r) { int16_t t = l; l = r; r = t; }
-            res->left[(uint16_t)y]  = l;
-            res->right[(uint16_t)y] = r;
-            res->mid[(uint16_t)y]   = (int16_t)((l + r) / 2);
-        }
-        return;
-    }
-
-    // ====== 双向插值：入口 ←→ 出口 ======
-
-    // 取入口边：enter_y 下方最近的有效行（近车头，数据可靠）
-    {
-        int16_t ey;
-        for (ey = (int16_t)(enter_y + 1); ey < (int16_t)VISION_H; ey++)
-        {
-            if (res->left[(uint16_t)ey] >= 0 && res->right[(uint16_t)ey] >= 0)
+            int16_t l = res->left[y];
+            int16_t r = res->right[y];
+            if (l >= 0 && r >= 0 && l > margin && r < boundary_r)
             {
-                entry_left  = res->left[(uint16_t)ey];
-                entry_right = res->right[(uint16_t)ey];
-                break;
+                if (!in_block)
+                {
+                    in_block = 1;
+                    cur_y0 = y;
+                    cur_len = 1;
+                }
+                else
+                {
+                    cur_len++;
+                }
+            }
+            else
+            {
+                if (in_block)
+                {
+                    in_block = 0;
+                    if (cur_len > best_len)
+                    {
+                        best_len = cur_len;
+                        best_y0 = cur_y0;
+                        best_y1 = y - 1u;
+                    }
+                }
             }
         }
-        if (entry_left < 0) return;
-    }
-
-    // 取出边：用 break_y 上方的边做直线拟合 → 在 break_y 处求值
-    {
-        y_fit_end = (uint16_t)break_y;
-        if (y_fit_end <= 5) return;
-        y_fit_start = (y_fit_end > 25) ? (uint16_t)(y_fit_end - 25) : 0;
-        y_fit_end = (uint16_t)(y_fit_end - 5);
-        if (y_fit_end <= y_fit_start) return;
-        if (!fit_line_x_of_y_q10(res->left,  y_fit_start, y_fit_end, -1, &kL_q10, &bL_q10)) return;
-        if (!fit_line_x_of_y_q10(res->right, y_fit_start, y_fit_end, -1, &kR_q10, &bR_q10)) return;
-
-        exit_left  = eval_line_q10(kL_q10, bL_q10, (uint16_t)break_y);
-        exit_right = eval_line_q10(kR_q10, bR_q10, (uint16_t)break_y);
-        exit_left  = clamp_i16(exit_left,  0, (int16_t)(VISION_W - 1));
-        exit_right = clamp_i16(exit_right, 0, (int16_t)(VISION_W - 1));
-        if (exit_left > exit_right)
-            { int16_t t = exit_left; exit_left = exit_right; exit_right = t; }
-    }
-
-    // 在入口(enter_y) 和 出口(break_y) 之间线性插值
-    {
-        uint16_t span = (uint16_t)(enter_y - break_y);
-
-        for (y = (int16_t)(break_y + 1); y < enter_y; y++)
+        if (in_block && cur_len > best_len)
         {
-            uint16_t t = (uint16_t)(y - break_y);
-            int16_t l = exit_left  + (int16_t)(((int32_t)(entry_left  - exit_left)  * t) / span);
-            int16_t r = exit_right + (int16_t)(((int32_t)(entry_right - exit_right) * t) / span);
-
-            l = clamp_i16(l, 0, (int16_t)(VISION_W - 1));
-            r = clamp_i16(r, 0, (int16_t)(VISION_W - 1));
-            if (l > r) { int16_t tmp = l; l = r; r = tmp; }
-
-            res->left[(uint16_t)y]  = l;
-            res->right[(uint16_t)y] = r;
-            res->mid[(uint16_t)y]   = (int16_t)((l + r) / 2);
+            best_len = cur_len;
+            best_y0 = cur_y0;
+            best_y1 = VISION_H - 1u;
         }
+
+        if (best_len < 20)
+            return;
+
+        anchor_y0 = best_y0;
+        anchor_y1 = best_y1;
+    }
+
+    // 2. 在锚点区域拟合左右边缘的直线趋势
+    if (!fit_line_x_of_y_q10(res->left,  anchor_y0, anchor_y1, -1, &kL_q10, &bL_q10))
+        return;
+    if (!fit_line_x_of_y_q10(res->right, anchor_y0, anchor_y1, -1, &kR_q10, &bR_q10))
+        return;
+
+    // 3. 逐行处理：碰边界的直接替换，偏离趋势远的也替换
+    for (y = 0; y < VISION_H; y++)
+    {
+        int16_t l = res->left[y];
+        int16_t r = res->right[y];
+        int16_t fl, fr, fm;
+        uint8_t touches_left, touches_right;
+
+        if (l < 0 || r < 0)
+        {
+            // 缺边：直接用投影
+            fl = eval_line_q10(kL_q10, bL_q10, y);
+            fr = eval_line_q10(kR_q10, bR_q10, y);
+            fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
+            fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
+            if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
+            res->left[y]  = fl;
+            res->right[y] = fr;
+            res->mid[y]   = (int16_t)((fl + fr) / 2);
+            continue;
+        }
+
+        touches_left  = (uint8_t)(l <= margin);
+        touches_right = (uint8_t)(r >= boundary_r);
+
+        if (!touches_left && !touches_right)
+        {
+            // 边不碰边界：检查中心是否偏离趋势太远
+            int16_t m;
+            int16_t dev;
+            uint8_t far_from_anchor;
+
+            m  = (int16_t)((l + r) / 2);
+            fl = eval_line_q10(kL_q10, bL_q10, y);
+            fr = eval_line_q10(kR_q10, bR_q10, y);
+            fm = (int16_t)((fl + fr) / 2);
+
+            far_from_anchor = (uint8_t)(y + 5u < anchor_y0 || y > anchor_y1 + 5u);
+            if (!far_from_anchor)
+                continue;
+
+            dev = (m > fm) ? (int16_t)(m - fm) : (int16_t)(fm - m);
+            if (dev <= 15)
+                continue;
+
+            fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
+            fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
+            if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
+            if (fl < fr)
+            {
+                res->left[y]  = fl;
+                res->right[y] = fr;
+                res->mid[y]   = (int16_t)((fl + fr) / 2);
+            }
+            continue;
+        }
+
+        // 碰边界：用趋势投影替换
+        fl = eval_line_q10(kL_q10, bL_q10, y);
+        fr = eval_line_q10(kR_q10, bR_q10, y);
+        fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
+        fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
+        if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
+        res->left[y]  = fl;
+        res->right[y] = fr;
+        res->mid[y]   = (int16_t)((fl + fr) / 2);
+    }
+}
+
+// 从两条连续边界曲线（左/右边线链）重建中线，而非简单 (left+right)/2。
+// 分别在左右边线上做 3 点中值平滑保持空间连续性，再从两条平滑曲线间取中点。
+// 转弯时个别行易出现噪点或边界触碰，逐行取中点易受误导；通过两条连续边线
+// 确定中线的思路更稳健。
+static void rebuild_mid_from_edge_chains(vision_track_result_t *res)
+{
+    uint16_t y;
+    int16_t smoothed_l[VISION_H];
+    int16_t smoothed_r[VISION_H];
+
+    if (res->valid_rows < 10) return;
+
+    for (y = 0; y < VISION_H; y++)
+        { smoothed_l[y] = res->left[y]; smoothed_r[y] = res->right[y]; }
+
+    for (y = 0; y < VISION_H; y++)
+    {
+        // 左边线链：局部 3 点中值
+        {
+            int16_t neighbors[3];
+            uint8_t cnt = 0;
+            int16_t dy;
+            for (dy = -1; dy <= 1; dy++)
+            {
+                int16_t yy = (int16_t)y + dy;
+                if (yy >= 0 && yy < (int16_t)VISION_H && res->left[(uint16_t)yy] >= 0)
+                    { neighbors[cnt] = res->left[(uint16_t)yy]; cnt++; }
+            }
+            if (cnt >= 2)
+            {
+                // 简单冒泡排序（最多 3 个元素）
+                if (cnt == 3 && neighbors[0] > neighbors[1])
+                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
+                if (cnt == 3 && neighbors[1] > neighbors[2])
+                    { int16_t t = neighbors[1]; neighbors[1] = neighbors[2]; neighbors[2] = t; }
+                if (cnt == 3 && neighbors[0] > neighbors[1])
+                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
+                smoothed_l[y] = neighbors[cnt / 2];
+            }
+        }
+
+        // 右边线链：局部 3 点中值
+        {
+            int16_t neighbors[3];
+            uint8_t cnt = 0;
+            int16_t dy;
+            for (dy = -1; dy <= 1; dy++)
+            {
+                int16_t yy = (int16_t)y + dy;
+                if (yy >= 0 && yy < (int16_t)VISION_H && res->right[(uint16_t)yy] >= 0)
+                    { neighbors[cnt] = res->right[(uint16_t)yy]; cnt++; }
+            }
+            if (cnt >= 2)
+            {
+                if (cnt == 3 && neighbors[0] > neighbors[1])
+                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
+                if (cnt == 3 && neighbors[1] > neighbors[2])
+                    { int16_t t = neighbors[1]; neighbors[1] = neighbors[2]; neighbors[2] = t; }
+                if (cnt == 3 && neighbors[0] > neighbors[1])
+                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
+                smoothed_r[y] = neighbors[cnt / 2];
+            }
+        }
+    }
+
+    // 从平滑后的左右边线链重建中线
+    for (y = 0; y < VISION_H; y++)
+    {
+        if (smoothed_l[y] >= 0 && smoothed_r[y] >= 0 && smoothed_l[y] < smoothed_r[y])
+            res->mid[y] = (int16_t)((smoothed_l[y] + smoothed_r[y]) / 2);
     }
 }
 
@@ -1136,10 +1435,15 @@ void vision_track_process(const uint8_t *gray, uint8_t *bin, vision_track_result
     // 6. 特征分类
     classify_feature(res, res);
 
-    // 7. 十字补线
+    // 7. 按特征各自修复边界
     if (res->feature == VISION_FEATURE_CROSS)
-        cross_fill_borders(res);
+        project_edges_through_cross(res);
+    else
+        fix_boundary_zones(res);
 
-    // 8. 中心误差
+    // 8. 从连续边线链重建中线（非逐行简单取中点）
+    rebuild_mid_from_edge_chains(res);
+
+    // 9. 中心误差
     compute_center_error(res, res);
 }

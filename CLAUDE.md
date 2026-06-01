@@ -15,16 +15,16 @@ vision_track.c  →  trail.c  →  control.c
   (edge extraction)  (element classification)  (steering + speed PID)
 ```
 
-### Layer 1: vision_track.c — Image processing
-1. Otsu thresholding + split threshold (near/far regions)
-2. Binarization + morphology (close gaps, open spurs, despeckle 4-neighbor)
-3. `extract_edges()` — bottom-up row scanning with `last_mid` continuity
-4. `interpolate_edge_gaps()` — linear interpolation across ≤5 row gaps
-5. `stabilize_rows_against_glare()` — revert rows with width/center jumps
-6. `fill_missing_edges_by_width()` — estimate missing edge from median lane width
+### Layer 1: vision_track.c — 图像处理
+1. Otsu 阈值 + 远近分阈
+2. 二值化 + 形态学（闭间隙、开毛刺、4邻域去噪）
+3. `extract_edges()` — 自底向上逐行扫描，`last_mid` 连续性约束
+4. `interpolate_edge_gaps()` — 线性插值填补 ≤5 行的边缘缺失
+5. `stabilize_rows_against_glare()` — 回退宽度/中心突变的行
+6. `fill_missing_edges_by_width()` — 用中位车道宽度估算缺失边
 7. `classify_feature()` — CROSS / RING_LEFT / RING_RIGHT / LOST
-8. `cross_fill_borders()` — bidirectional line fitting for cross intersections
-9. `compute_center_error()` — windowed median at `VISION_LOOKAHEAD_Y` (row 85)
+8. `project_edges_through_cross()` — 十字锚点区域直线外推（代替 `cross_fill_borders`）
+9. `compute_center_error()` — 在 `VISION_LOOKAHEAD_Y`（第85行）取窗口内中位数
 
 ### Layer 2: trail.c — Track element classification
 - Classifies: STRAIGHT, RIGHT_ANGLE_l/r, CROSS, RING_l/r/c, BROKEN, BROKEN_RODE
@@ -67,7 +67,7 @@ vision_track.c  →  trail.c  →  control.c
 ### Vision / Edge Extraction
 - `find_widest_run_0()` finds the WIDEST track segment per row — wrong in turns where lane is nearly horizontal (entire image width looks like "track"). Use `find_nearest_run_0()` for fallback when `last_mid` expansion fails.
 - **Boundary-touching segments**: when `l <= 2` or `r >= 185`, that edge is likely the image boundary, not a real lane edge. Mark as unknown (-1) so `fill_missing_edges_by_width()` fills it with median lane width.
-- `cross_fill_borders()` does bidirectional interpolation: finds entry_y (bottom) and break_y (top), fits lines to edges on both sides, interpolates between them.
+- `project_edges_through_cross()` — 检测到 CROSS 后，用锚点区域的直线趋势外推替换碰边界的边缘，使中线平滑穿过十字
 
 ### Trail / Element Classification
 - `plan_straight_center` weights: `(near_mid + far_mid * 2) / 3` — favors far point (67%) for smoother tracking
@@ -89,3 +89,34 @@ vision_track.c  →  trail.c  →  control.c
 
 ### Files NOT to modify
 - `pid.h` / `pid.c` struct definitions — mature, user-rejected changes
+
+## 十字路口处理逻辑
+
+### CROSS 检测（classify_feature）
+- CROSS 检测使用的边界判断阈值是 **4px**，不是 `VISION_EDGE_NEAR_TH=2`
+- 原因：MT9V034 摄像头镜头渐晕（vignette）在 x=183-187 产生伪边界，`r=184` 的行需要被视为碰边界
+- 条件：`w > 150（CROSS_WIDE_TH）` 且 `l <= 4` 或 `r >= 183`，连续满足 ≥6 行判定为 CROSS
+- 滞回：C 代码中 `cross_hold=4`，检测到 CROSS 后保持 4 帧
+
+### project_edges_through_cross() — 锚点趋势外推
+功能：检测到 CROSS 后，替换碰边界的边缘为锚点区域的直线拟合投影。
+
+算法步骤：
+1. **找锚点区域**：扫描所有行，收集左右边都不碰边界的行（`l > 4 AND r < 183`）。取最大连续块，需要 ≥20 行，否则跳过
+2. **直线拟合**：在锚点区域分别对左边缘和右边缘用最小二乘拟合 `x = k*y + b`，采用 Q10 定点运算
+3. **逐行外推**：
+   - 缺边行 → 直接用投影值填充
+   - 碰边界行（`l <= 4 || r >= 183`）→ 用投影值替换
+   - 不碰边界但离锚点区域超过 5 行且中心偏差 >15px → 也用投影值替换
+4. 投影值 clamp 到 `[0, 187]`，确保 `l < r`
+
+### 锚点区域注意事项
+- 锚点必须是非碰边界的连续可靠行段（通常在 y=32-96）
+- 锚点行左边缘 >4，右边缘 <183
+- 十字臂残留行（y=0-31，顶部十字臂）会被排除，因为它们虽然不碰边界，但中心偏移且宽度异常
+- 锚点不够（<20行）时不处理，保持原始边缘
+
+### 管线流程差异
+- **CROSS 帧**：`classify_feature()` → `project_edges_through_cross()` → `rebuild_mid_from_edge_chains()` → `compute_center_error()`
+- **非 CROSS 帧**：`classify_feature()` → `fix_boundary_zones()` / `trace_edges_incremental()` → `rebuild_mid_from_edge_chains()` → `compute_center_error()`
+- Python 评估脚本中，CROSS 帧会跳过 `trace_edges_incremental()`，因为 2D 骨架追踪会把十字路口当成一个宽区域处理，中心会被拉到图像中心（94），而不是车道原中心（99）

@@ -1,5 +1,6 @@
 #include "ky_headfile.h"
 #include "main.h"
+#include "wireless_vision.h"
 
 void System_Init(void);
 void debug_main(void);
@@ -28,6 +29,7 @@ void System_Init(void)
     encoder_Init();
     servo_Init();
     control_Init();
+    //wireless_vision_init();
 }
 
 void debug_main(void)

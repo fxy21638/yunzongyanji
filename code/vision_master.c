@@ -1,6 +1,10 @@
 #include "ky_headfile.h"
 #include "vision_master.h"
 #include "vision_track.h"
+#include "wireless_vision.h"
+
+// 无线图像输出: 0=仅USB, 1=USB+无线
+#define WIRELESS_IMAGE_OUTPUT 0
 
 #define DISPLAY_MAX_CHAIN_POINTS MT9V034_HEIGHT
 #define DISPLAY_CENTER_POINTS 128
@@ -9,6 +13,7 @@
 #define DISPLAY_CROSS_MIN_STREAK 3
 #define DISPLAY_PAIR_Y_GAP_MAX 3
 #define DISPLAY_CENTER_X_JUMP_MAX 18
+#define DISPLAY_EDGE_NEAR_TH 2
 
 typedef struct
 {
@@ -349,11 +354,150 @@ static int16_t find_right_match_x(int16_t y, int16_t left_x)
 	return best_x;
 }
 
-static void build_center_chain_from_boundaries(void)
+static uint8_t row_is_clean_for_center(int16_t left_x, int16_t right_x)
 {
+	if (left_x <= DISPLAY_EDGE_NEAR_TH)
+	{
+		return 0;
+	}
+	if (right_x >= (int16_t)(MT9V034_WIDTH - 1 - DISPLAY_EDGE_NEAR_TH))
+	{
+		return 0;
+	}
+	return 1;
+}
+
+static void build_center_chain_from_boundaries(const vision_track_result_t *track)
+{
+	int16_t left_buf[MT9V034_HEIGHT];
+	int16_t right_buf[MT9V034_HEIGHT];
+	display_line_q8_t left_line;
+	display_line_q8_t right_line;
+	uint16_t y;
+	uint16_t block_start;
+	uint16_t block_end;
+	uint16_t block_len;
+	uint16_t best_start;
+	uint16_t best_end;
+	uint16_t best_len;
+	uint8_t in_block;
+	int16_t l;
+	int16_t r;
+	int16_t proj_l;
+	int16_t proj_r;
 	uint16_t i;
 
 	g_center_count = 0;
+	if (track == NULL)
+	{
+		return;
+	}
+
+	for (y = 0; y < MT9V034_HEIGHT; y++)
+	{
+		left_buf[y] = track->left[y];
+		right_buf[y] = track->right[y];
+	}
+
+	best_len = 0;
+	in_block = 0;
+	block_start = 0;
+	for (y = 0; y < MT9V034_HEIGHT; y++)
+	{
+		if (left_buf[y] >= 0 && right_buf[y] >= 0 && row_is_clean_for_center(left_buf[y], right_buf[y]))
+		{
+			if (!in_block)
+			{
+				block_start = y;
+				in_block = 1;
+			}
+		}
+		else if (in_block)
+		{
+			block_end = (uint16_t)(y - 1);
+			block_len = (uint16_t)(block_end - block_start + 1);
+			if (block_len > best_len)
+			{
+				best_len = block_len;
+				best_start = block_start;
+				best_end = block_end;
+			}
+			in_block = 0;
+		}
+	}
+
+	if (in_block)
+	{
+		block_end = (uint16_t)(MT9V034_HEIGHT - 1);
+		block_len = (uint16_t)(block_end - block_start + 1);
+		if (block_len > best_len)
+		{
+			best_len = block_len;
+			best_start = block_start;
+			best_end = block_end;
+		}
+	}
+
+	if (best_len >= 4 &&
+		fit_edge_line_q8_track(left_buf, best_start, best_end, &left_line) &&
+		fit_edge_line_q8_track(right_buf, best_start, best_end, &right_line))
+	{
+		for (y = 0; y < MT9V034_HEIGHT; y++)
+		{
+			if (left_buf[y] < 0 || right_buf[y] < 0 || !row_is_clean_for_center(left_buf[y], right_buf[y]))
+			{
+				proj_l = eval_line_q8_track(&left_line, y);
+				proj_r = eval_line_q8_track(&right_line, y);
+				if (proj_l < 0)
+				{
+					proj_l = 0;
+				}
+				if (proj_r >= (int16_t)MT9V034_WIDTH)
+				{
+					proj_r = (int16_t)(MT9V034_WIDTH - 1);
+				}
+				if (proj_l > proj_r)
+				{
+					l = proj_l;
+					proj_l = proj_r;
+					proj_r = l;
+				}
+				left_buf[y] = proj_l;
+				right_buf[y] = proj_r;
+			}
+		}
+
+		for (y = (uint16_t)(MT9V034_HEIGHT - 1); y < MT9V034_HEIGHT; y--)
+		{
+			if (left_buf[y] >= 0 && right_buf[y] >= 0 && left_buf[y] < right_buf[y])
+			{
+				if (g_center_count < DISPLAY_CENTER_POINTS)
+				{
+					g_center_chain[g_center_count].x = (int16_t)((left_buf[y] + right_buf[y]) / 2);
+					g_center_chain[g_center_count].y = (int16_t)y;
+					g_center_count++;
+				}
+				else
+				{
+					break;
+				}
+			}
+			if (y == 0)
+			{
+				break;
+			}
+		}
+
+		if (g_center_count >= 3)
+		{
+			smooth_chain(g_center_chain, g_center_count);
+		}
+		if (g_center_count > 0)
+		{
+			return;
+		}
+	}
+
 	if (g_left_count < 2 || g_right_count < 2)
 	{
 		return;
@@ -425,6 +569,10 @@ static void draw_center_chain(uint8_t *out)
 	uint16_t i;
 	int16_t last_x = -1;
 	int16_t last_y = -1;
+	int16_t x;
+	int16_t y;
+	int16_t dy;
+	int16_t dx;
 
 	if (g_center_count == 0)
 	{
@@ -433,13 +581,14 @@ static void draw_center_chain(uint8_t *out)
 
 	for (i = 0; i < g_center_count; i++)
 	{
-		int16_t x = g_center_chain[i].x;
-		int16_t y = g_center_chain[i].y;
+		x = g_center_chain[i].x;
+		y = g_center_chain[i].y;
+		draw_thick_point(out, x, y);
 
 		if (last_x >= 0)
 		{
-			int16_t dy = abs_i16((int16_t)(y - last_y));
-			int16_t dx = abs_i16((int16_t)(x - last_x));
+			dy = abs_i16((int16_t)(y - last_y));
+			dx = abs_i16((int16_t)(x - last_x));
 			if (dy <= DISPLAY_PAIR_Y_GAP_MAX && dx <= DISPLAY_CENTER_X_JUMP_MAX)
 			{
 				draw_segment(out, last_x, last_y, x, y);
@@ -454,7 +603,7 @@ static void draw_center_chain(uint8_t *out)
 static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_track_result_t *track)
 {
 	build_boundary_chains(track);
-	build_center_chain_from_boundaries();
+	build_center_chain_from_boundaries(track);
 	memcpy(out, gray, MT9V034_IMAGE_SIZE);
 	draw_center_chain(out);
 }
@@ -464,7 +613,7 @@ static void render_pseudo_gray(uint8_t *out, const uint8_t *bin, const vision_tr
 	uint16_t i;
 
 	build_boundary_chains(track);
-	build_center_chain_from_boundaries();
+	build_center_chain_from_boundaries(track);
 
 	for (i = 0; i < MT9V034_IMAGE_SIZE; i++)
 	{
@@ -483,14 +632,23 @@ void vofa_image_task(void)
 
 		// 1. 原始灰度图
 		vofa_sendGrayscaleImageEx((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
+#if (WIRELESS_IMAGE_OUTPUT == 1)
+		wireless_vision_send_image((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
+#endif
 
 		// 2. 二值化伪彩图（image_data 当前是二值化结果，render_pseudo_gray 原地转换）
 		render_pseudo_gray((uint8_t *)image_data, (const uint8_t *)image_data, &g_vofa_track);
 		vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
+#if (WIRELESS_IMAGE_OUTPUT == 1)
+		wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
+#endif
 
 		// 3. 灰度叠加中线图（覆盖 image_data）
 		render_overlay_mid((uint8_t *)image_data, (const uint8_t *)mt9v034_image, &g_vofa_track);
 		vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
+#if (WIRELESS_IMAGE_OUTPUT == 1)
+		wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
+#endif
 
 		mt9v034_frame_ready = 0;
 	}

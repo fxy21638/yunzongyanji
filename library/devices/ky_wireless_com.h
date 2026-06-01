@@ -31,7 +31,7 @@
 #include "ky_ringbuffer.h"
 
 // д╛хо╡╗льбй
-#define WIRELESS_COM_DEFAULT_BAUD   1000000
+#define WIRELESS_COM_DEFAULT_BAUD   115200
 
 // UART еДжц
 #define WIRELESS_COM_UART           UART_4
