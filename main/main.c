@@ -1,6 +1,6 @@
 #include "ky_headfile.h"
 #include "main.h"
-#include "wireless_vision.h"
+#include "vision_master.h"
 
 void System_Init(void);
 void debug_main(void);
@@ -34,18 +34,6 @@ void System_Init(void)
 
 void debug_main(void)
 {
-    static uint8_t started = 0;
-
-//    key_scan(10);
-
-//    if (!started)
-//    {
-//        if (key_is_pressed(KEY1_ID))
-//            started = 1;
-//        return;
-//    }
-
-    vofa_image_task();
     track_handle();
-    //speed_tune_send();
+    vofa_image_task();
 }

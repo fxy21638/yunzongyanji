@@ -674,6 +674,12 @@ static void stabilize_rows_against_glare(vision_track_result_t *res)
     }
 }
 
+// 前向声明（定义在 classify_feature 之后）
+static uint8_t fit_line_x_of_y_q10(const int16_t *x_arr, uint16_t y_start,
+                                    uint16_t y_end, int16_t x_invalid,
+                                    long *k_q10, long *b_q10);
+static int16_t eval_line_q10(long k_q10, long b_q10, uint16_t y);
+
 // 单边补全：用已知车道宽度中位数，根据单边边界估算缺失边
 static void fill_missing_edges_by_width(vision_track_result_t *res)
 {
@@ -959,7 +965,7 @@ static void classify_feature(const vision_track_result_t *res, vision_track_resu
 
         l = res->left[y];
         r = res->right[y];
-        if (l < 0) continue;
+        if (l < 0 || r < 0) continue;
 
         w = (uint16_t)(r - l + 1);
 
@@ -968,7 +974,13 @@ static void classify_feature(const vision_track_result_t *res, vision_track_resu
         if (w > (uint16_t)VISION_CROSS_WIDE_TH_NUM &&
             (l <= 4 ||
              r >= (int16_t)(VISION_W - 1 - 4)))
+        {
             cross_cnt++;
+        }
+        else if (w > (uint16_t)VISION_CROSS_END_TH_NUM)
+        {
+            cross_cnt++;
+        }
 
         if (w > (uint16_t)(VISION_W * 6 / 10))
         {

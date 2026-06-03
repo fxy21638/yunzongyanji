@@ -8,12 +8,16 @@
 
 #define DISPLAY_MAX_CHAIN_POINTS MT9V034_HEIGHT
 #define DISPLAY_CENTER_POINTS 128
+#define DISPLAY_CENTER_Y_BOTTOM (MT9V034_HEIGHT - 20)  // 从底部向上数第20行 = y99
+#define DISPLAY_CENTER_Y_TOP    (MT9V034_HEIGHT - 100)  // 从底部向上数第80行 = y39
+#define DISPLAY_CENTER_MAX_COUNT (DISPLAY_CENTER_Y_BOTTOM - DISPLAY_CENTER_Y_TOP + 1)
 #define DISPLAY_CROSS_BASE_Y0 (MT9V034_HEIGHT - 18)
 #define DISPLAY_CROSS_BASE_Y1 (MT9V034_HEIGHT - 6)
 #define DISPLAY_CROSS_MIN_STREAK 3
 #define DISPLAY_PAIR_Y_GAP_MAX 3
 #define DISPLAY_CENTER_X_JUMP_MAX 18
 #define DISPLAY_EDGE_NEAR_TH 2
+#define DISPLAY_CROSS_TOUCH_MARGIN 4
 
 typedef struct
 {
@@ -113,7 +117,10 @@ static int16_t detect_cross_break_row_track(const vision_track_result_t *track)
 		if (track->left[(uint16_t)y] >= 0 && track->right[(uint16_t)y] >= 0)
 		{
 			int16_t w = (int16_t)(track->right[(uint16_t)y] - track->left[(uint16_t)y] + 1);
-			if (w > base_w + base_w / 2)
+			if (w > base_w + base_w / 5 ||
+				(w > base_w + 12 &&
+				 (track->left[(uint16_t)y] <= DISPLAY_CROSS_TOUCH_MARGIN ||
+				  track->right[(uint16_t)y] >= (int16_t)(MT9V034_WIDTH - 1 - DISPLAY_CROSS_TOUCH_MARGIN))))
 			{
 				if (!in_cross)
 				{
@@ -284,22 +291,17 @@ static void build_boundary_chains(const vision_track_result_t *track)
 
 	stabilize_cross_boundaries(track, left_buf, right_buf);
 
-	for (y = (int16_t)(MT9V034_HEIGHT - 1); y >= 0; y--)
+	// 和中线范围一致：从底部向上数第20~80行
+	for (y = (int16_t)DISPLAY_CENTER_Y_BOTTOM; y >= (int16_t)DISPLAY_CENTER_Y_TOP; y--)
 	{
 		if (left_buf[(uint16_t)y] >= 0 && right_buf[(uint16_t)y] >= 0)
 		{
-			if (g_left_count < DISPLAY_MAX_CHAIN_POINTS)
-			{
-				g_left_chain[g_left_count].x = left_buf[(uint16_t)y];
-				g_left_chain[g_left_count].y = y;
-				g_left_count++;
-			}
-			if (g_right_count < DISPLAY_MAX_CHAIN_POINTS)
-			{
-				g_right_chain[g_right_count].x = right_buf[(uint16_t)y];
-				g_right_chain[g_right_count].y = y;
-				g_right_count++;
-			}
+			g_left_chain[g_left_count].x = left_buf[(uint16_t)y];
+			g_left_chain[g_left_count].y = y;
+			g_left_count++;
+			g_right_chain[g_right_count].x = right_buf[(uint16_t)y];
+			g_right_chain[g_right_count].y = y;
+			g_right_count++;
 		}
 	}
 }
@@ -467,24 +469,13 @@ static void build_center_chain_from_boundaries(const vision_track_result_t *trac
 			}
 		}
 
-		for (y = (uint16_t)(MT9V034_HEIGHT - 1); y < MT9V034_HEIGHT; y--)
+		for (y = DISPLAY_CENTER_Y_BOTTOM; y >= DISPLAY_CENTER_Y_TOP; y--)
 		{
 			if (left_buf[y] >= 0 && right_buf[y] >= 0 && left_buf[y] < right_buf[y])
 			{
-				if (g_center_count < DISPLAY_CENTER_POINTS)
-				{
-					g_center_chain[g_center_count].x = (int16_t)((left_buf[y] + right_buf[y]) / 2);
-					g_center_chain[g_center_count].y = (int16_t)y;
-					g_center_count++;
-				}
-				else
-				{
-					break;
-				}
-			}
-			if (y == 0)
-			{
-				break;
+				g_center_chain[g_center_count].x = (int16_t)((left_buf[y] + right_buf[y]) / 2);
+				g_center_chain[g_center_count].y = (int16_t)y;
+				g_center_count++;
 			}
 		}
 
@@ -511,7 +502,7 @@ static void build_center_chain_from_boundaries(const vision_track_result_t *trac
 		int16_t rx = find_right_match_x(g_left_chain[i].y, g_left_chain[i].x);
 		if (rx >= 0)
 		{
-			if (g_center_count < DISPLAY_CENTER_POINTS)
+			if (g_center_count < DISPLAY_CENTER_MAX_COUNT)
 			{
 				g_center_chain[g_center_count].x = (int16_t)((g_left_chain[i].x + rx) / 2);
 				g_center_chain[g_center_count].y = g_left_chain[i].y;
@@ -523,6 +514,45 @@ static void build_center_chain_from_boundaries(const vision_track_result_t *trac
 			}
 		}
 	}
+}
+
+// 虚线横线: dash_len 像素有, gap_len 像素无
+static void draw_dashed_hline(uint8_t *out, int16_t y, uint8_t dash_len, uint8_t gap_len)
+{
+	int16_t x;
+	uint8_t phase = 0;
+	uint8_t cnt = 0;
+
+	if (y < 0 || y >= (int16_t)MT9V034_HEIGHT) return;
+
+	for (x = 0; x < (int16_t)MT9V034_WIDTH; x++)
+	{
+		if (cnt == 0)
+		{
+			cnt = (phase == 0) ? dash_len : gap_len;
+			phase = (uint8_t)(1 - phase);
+		}
+		if (phase == 0)
+			out[(uint16_t)y * MT9V034_WIDTH + (uint16_t)x] = 0;
+		cnt--;
+	}
+}
+
+// 绘制关键参考行标记
+static void draw_reference_lines(uint8_t *out)
+{
+	// 中线绘制范围（底部标记）
+	draw_dashed_hline(out, (int16_t)DISPLAY_CENTER_Y_BOTTOM, 2, 10);
+	draw_dashed_hline(out, (int16_t)DISPLAY_CENTER_Y_TOP,    2, 10);
+
+	// 直道远点 row60（权重67%）
+	draw_dashed_hline(out, (int16_t)(MT9V034_HEIGHT / 2), 4, 4);
+
+	// 主前视行 row85（CROSS取中心、compute_center_error主行）
+	draw_dashed_hline(out, (int16_t)VISION_LOOKAHEAD_Y, 4, 4);
+
+	// 直道近点 row98（权重33%）
+	draw_dashed_hline(out, (int16_t)(MT9V034_HEIGHT - 22), 4, 4);
 }
 
 static void draw_thick_point(uint8_t *out, int16_t x, int16_t y)
@@ -600,12 +630,45 @@ static void draw_center_chain(uint8_t *out)
 	}
 }
 
+static void draw_boundary_chains(uint8_t *out)
+{
+	uint16_t i;
+	int16_t last_x, last_y;
+
+	if (g_left_count >= 2)
+	{
+		last_x = g_left_chain[0].x; last_y = g_left_chain[0].y;
+		for (i = 1; i < g_left_count; i++)
+		{
+			if (abs_i16((int16_t)(g_left_chain[i].y - last_y)) <= DISPLAY_PAIR_Y_GAP_MAX)
+			{
+				draw_segment(out, last_x, last_y, g_left_chain[i].x, g_left_chain[i].y);
+			}
+			last_x = g_left_chain[i].x; last_y = g_left_chain[i].y;
+		}
+	}
+	if (g_right_count >= 2)
+	{
+		last_x = g_right_chain[0].x; last_y = g_right_chain[0].y;
+		for (i = 1; i < g_right_count; i++)
+		{
+			if (abs_i16((int16_t)(g_right_chain[i].y - last_y)) <= DISPLAY_PAIR_Y_GAP_MAX)
+			{
+				draw_segment(out, last_x, last_y, g_right_chain[i].x, g_right_chain[i].y);
+			}
+			last_x = g_right_chain[i].x; last_y = g_right_chain[i].y;
+		}
+	}
+}
+
 static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_track_result_t *track)
 {
 	build_boundary_chains(track);
 	build_center_chain_from_boundaries(track);
 	memcpy(out, gray, MT9V034_IMAGE_SIZE);
+	draw_boundary_chains(out);
 	draw_center_chain(out);
+	draw_reference_lines(out);
 }
 
 static void render_pseudo_gray(uint8_t *out, const uint8_t *bin, const vision_track_result_t *track)
@@ -620,7 +683,9 @@ static void render_pseudo_gray(uint8_t *out, const uint8_t *bin, const vision_tr
 		out[i] = (bin[i] == 0) ? 220 : 40;
 	}
 
+	draw_boundary_chains(out);
 	draw_center_chain(out);
+	draw_reference_lines(out);
 }
 
 void vofa_image_task(void)

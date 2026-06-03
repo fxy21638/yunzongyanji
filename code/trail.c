@@ -8,6 +8,8 @@
 #define TRACK_TURN_SHIFT       28
 #define TRACK_MIN_VALID_TURN_ROWS 8
 #define CROSS_MIN_STREAK       3
+#define CROSS_TOUCH_MARGIN     4
+#define CROSS_WIDE_EXTRA_NUM   5
 
 typedef struct
 {
@@ -47,6 +49,37 @@ static const char *track_element_name(TRACK_ELEMENT element)
     case BROKEN_RODE: return "BROKEN_ROAD";
     default: return "UNKNOWN";
     }
+}
+
+static uint8_t count_cross_rows(const vision_track_result_t *track)
+{
+    uint16_t y;
+    uint8_t cross_cnt = 0;
+
+    for (y = (uint16_t)(MT9V034_HEIGHT / 2); y < MT9V034_HEIGHT; y++)
+    {
+        int16_t l = track->left[y];
+        int16_t r = track->right[y];
+        uint16_t w;
+
+        if (l < 0 || r < 0)
+        {
+            continue;
+        }
+
+        w = (uint16_t)(r - l + 1);
+        if (w > (uint16_t)TRACK_WIDE_TH &&
+            (l <= CROSS_TOUCH_MARGIN || r >= (int16_t)(MT9V034_WIDTH - 1 - CROSS_TOUCH_MARGIN)))
+        {
+            cross_cnt++;
+        }
+        else if (w > (uint16_t)(TRACK_WIDE_TH + TRACK_WIDE_TH / CROSS_WIDE_EXTRA_NUM))
+        {
+            cross_cnt++;
+        }
+    }
+
+    return cross_cnt;
 }
 
 static uint8_t clamp_center_to_target(int16_t center_x)
@@ -219,7 +252,10 @@ static int16_t detect_cross_break_row(void)
         if (g_track.left[(uint16_t)y] >= 0 && g_track.right[(uint16_t)y] >= 0)
         {
             int16_t w = (int16_t)(g_track.right[(uint16_t)y] - g_track.left[(uint16_t)y] + 1);
-            if (w > base_w + base_w / 3)
+            if (w > base_w + base_w / 5 ||
+                (w > base_w + 12 &&
+                 (g_track.left[(uint16_t)y] <= CROSS_TOUCH_MARGIN ||
+                  g_track.right[(uint16_t)y] >= (int16_t)(MT9V034_WIDTH - 1 - CROSS_TOUCH_MARGIN))))
             {
                 if (!in_cross)
                 {
@@ -432,6 +468,8 @@ static void report_track_element_if_changed(void)
 void track_handle(void)
 {
     static uint8_t cross_exit_hold = 0;
+    int16_t break_row;
+    uint8_t cross_cnt;
 
     vision_poll_track();
     if (!g_track_valid)
@@ -444,6 +482,8 @@ void track_handle(void)
     track_element_P = track_element;
     track_midpoint_target_P = track_midpoint_target;
     current_element = track_element_judge();
+    cross_cnt = count_cross_rows(&g_track);
+    break_row = detect_cross_break_row();
 
     if (current_element == CROSS)
     {
@@ -506,6 +546,15 @@ void track_handle(void)
         smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
         track_midpoint_target = (uint8_t)((smooth + 2) / 4);
     }
+
+    printf("DBG feature:%d cross_cnt:%u break_row:%d valid_rows:%u center_x:%d element:%s target:%u\r\n",
+           g_track.feature,
+           cross_cnt,
+           break_row,
+           g_track.valid_rows,
+           g_track.center_x,
+           track_element_name(track_element),
+           track_midpoint_target);
 
     report_track_element_if_changed();
 }
