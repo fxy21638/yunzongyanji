@@ -1,122 +1,130 @@
-# CLAUDE.md — YG Smart Car Line-Following Project
+# CLAUDE.md — YG 智能车循迹项目
 
-## Environment
-- **MCU**: STC32G144K246 (8051 variant), 99MHz
-- **Compiler**: Keil C251 — **requires all variable declarations at the start of each block** (before any executable statement). C99 mixed declarations are NOT supported.
-- **Camera**: MT9V034 188×120, parallel DCMI interface, soft I2C config (P14/P15)
-- **IMU**: ICM42686 via SPI_2 (P02=CS, P03=MOSI, P04=MISO, P05=SCLK, 10MHz Mode 0)
-- **Servo**: steering, range [70,110] servo angle, mapping: `servo = 90 + wheel_angle × 2.0`, clamped to ±10° wheel
-- **Build**: Keil project `KYPROJECT`
+## 环境
+- **MCU**: STC32G144K246 (8051 变种), 99MHz
+- **编译器**: Keil C251 — **所有变量声明必须在块开头**（在任何可执行语句之前），不支持 C99 混合声明
+- **摄像头**: MT9V034 188×120, 并行 DCMI 接口, 软 I2C 配置 (P14/P15)
+- **IMU**: ICM42686 通过 SPI_2 (P02=CS, P03=MOSI, P04=MISO, P05=SCLK, 10MHz Mode 0)
+- **舵机**: 转向, 范围 [70,110], 映射: `servo = 90 + wheel_angle × 2.0`, 限制 ±10°
+- **构建**: Keil 工程 `KYPROJECT`
 
-## Architecture — 3-Layer Tracking Pipeline
+## 架构 — 3 层循迹管线
 
 ```
 vision_track.c  →  trail.c  →  control.c
-  (edge extraction)  (element classification)  (steering + speed PID)
+  (边界提取+中线)    (元素分类)    (转向+速度 PID)
 ```
 
-### Layer 1: vision_track.c — 图像处理
-1. Otsu 阈值 + 远近分阈
-2. 二值化 + 形态学（闭间隙、开毛刺、4邻域去噪）
-3. `extract_edges()` — 自底向上逐行扫描，`last_mid` 连续性约束
-4. `interpolate_edge_gaps()` — 线性插值填补 ≤5 行的边缘缺失
-5. `stabilize_rows_against_glare()` — 回退宽度/中心突变的行
-6. `fill_missing_edges_by_width()` — 用中位车道宽度估算缺失边
-7. `classify_feature()` — CROSS / RING_LEFT / RING_RIGHT / LOST
-8. `project_edges_through_cross()` — 十字锚点区域直线外推（代替 `cross_fill_borders`）
-9. `compute_center_error()` — 在 `VISION_LOOKAHEAD_Y`（第85行）取窗口内中位数
+### 第 1 层: vision_track.c — 图像处理
+1. `Turn_To_Bin` — Otsu 阈值 × 1.075 偏置，亮色→255(赛道), 暗色→0(背景)
+2. `Image_Filter` — 8 邻域和阈值滤波（sum ≥ 255×5 → 填白, sum ≤ 255×2 → 填黑）
+3. `Image_Draw_Rectan` — 四周 2px 黑边框，防止追踪越界
+4. `Get_Start_Point` — 从图像中间向左右搜索黑白交界种子点
+5. `Search_L_R` — 双边同步 Moore 8 邻域追踪（左顺时针、右逆时针，同步防交叉）
+6. `Get_Left` / `Get_Right` — 点集 → 逐行边界数组
+7. `Cross_Fill` — 拐点检测 + 直线拟合补全十字路口缺失边界
+8. `Center_Line = (L+R)/2` — 逐行中线
+9. `Image_Erro` — 加权平均: `0.375×C[103] + 0.5×C[105] + 0.1×C[106]`
+10. 二值图翻转 — 赛道=0, 背景=255（适配 VOFA 显示约定）
 
-### Layer 2: trail.c — Track element classification
-- Classifies: STRAIGHT, RIGHT_ANGLE_l/r, CROSS, RING_l/r/c, BROKEN, BROKEN_RODE
-- Plans target midpoint per element type (`track_midpoint_target`)
-- Jump limiter ±12 px/frame + EMA smoothing (25% new, 75% old): `(new + old*3 + 2)/4`
-- Cross exit hold: 3 frames of CENTER_POINT after CROSS ends
+**关键内部常量 (188×120 适配)**:
+| 常量 | 值 | 说明 |
+|------|-----|------|
+| `IMG_W` | 188 | 图像宽度 |
+| `IMG_H` | 120 | 图像高度 |
+| `BORDER_MAX` | 186 | 右边界上限 |
+| `USE_NUM` | 360 (=120×3) | Moore 追踪最大步数 |
+| `ERRO_ROW_LO/MID/HI` | 103/105/106 | 偏差计算前瞻行 |
+| `STRAIGHT_LINE_CNT` | 90 | 直线判断计数 |
+| `LOSE_LINE_R_TH` | 184 | 右丢线阈值 |
 
-### Layer 3: control.c — Motor + steering control
-- 5ms timer ISR (TIM_1): `control_timer_callback()`
-- `steering_control()`: emergency recovery (edge-based), normal PID (Kp=0.40, Kd=0.35, NO Ki)
-- `motor_speed_control()`: IncrementalPID per wheel
-- `FIXED_SPEED_DEBUG=1` uses `FIXED_PWM_DUTY=600` (no speed PID)
-- EMA steering output: `steer_smooth * 0.2 + steer_output * 0.8`
-- Gyro (yaw) only used for BROKEN_RODE heading hold, NOT for normal turns
+**已废弃文件** (从工程中移除):
+- `boundary_trace.c/h` — 旧的单边追踪，已被 Search_L_R 替代
+- `perspective.c/h` — 鸟瞰变换，`VISION_USE_WALLFOLLOW=0` 排除
+- `point_set.c/h` — 点集操作，`sqrtf`/`atan2f`/`pts_curvature_3pt` 已迁移至 vision_track.c
 
-## PID Architecture — DO NOT MODIFY
-- **User explicitly stated: "这是一个很成熟的PID架构了，可以不改这个架构实现功能的"**
-- `PositionalPID`: Kp, Kd only — NO Ki, NO integral term. Do not add fields.
-- `IncrementalPID`: Kp, Ki, error_prev — exists for speed control only
-- `AnglePID`: KP, KP2, KD, GKD, error_prev — used when CASCADE_PID != 1
-- PID gains live in `pid.c`, not in headers
+### 第 2 层: trail.c — 赛道元素分类
+- 分类: STRAIGHT, RIGHT_ANGLE_l/r, CROSS, RING_l/r/c, BROKEN, BROKEN_RODE
+- 按元素类型规划目标中点 (`track_midpoint_target`)
+- 跳变限制 ±12 px/帧 + EMA 平滑 (25% 新, 75% 旧): `(new + old*3 + 2)/4`
+- 十字出口保持: CROSS 结束后保持 CENTER_POINT 3 帧
+- VOFA+ 调试输出: `VOFA_FIREWATER=1` 时发送 10 个 float 变量
 
-## Key Constants
-| Constant | Value | Location |
+### 第 3 层: control.c — 电机+转向控制
+- 5ms 定时器 ISR (TIM_1): `control_timer_callback()`
+- `steering_control()`: 紧急恢复(基于边缘), 正常 PID (Kp=0.40, Kd=0.35, 无 Ki)
+- `motor_speed_control()`: 增量 PID 每轮
+- `FIXED_SPEED_DEBUG=1` 使用 `FIXED_PWM_DUTY=600` (无速度 PID)
+- EMA 转向输出: `steer_smooth * 0.2 + steer_output * 0.8`
+- 陀螺仪 (yaw) 仅用于 BROKEN_RODE 航向保持, 不用于普通转弯
+
+## PID 架构 — 禁止修改
+- **用户明确声明: "这是一个很成熟的PID架构了，可以不改这个架构实现功能的"**
+- `PositionalPID`: 仅 Kp, Kd — 无 Ki, 无积分项, 不要添加字段
+- `IncrementalPID`: Kp, Ki, error_prev — 仅用于速度控制
+- `AnglePID`: KP, KP2, KD, GKD, error_prev — 当 CASCADE_PID != 1 时使用
+- PID 参数定义在 `pid.c`, 不在头文件
+
+## 关键常量
+| 常量 | 值 | 位置 |
 |----------|-------|----------|
 | MT9V034_WIDTH / HEIGHT | 188 / 120 | vision_track.h |
-| CENTER_POINT | 94 | trail.h or vision config |
+| CENTER_POINT | 94 | trail.h |
 | VISION_LOOKAHEAD_Y | HEIGHT-35 = 85 | vision_track.h |
 | TRACK_TURN_SHIFT | 28 | trail.c:8 |
 | STEER_OUTPUT_LIMIT | 20.0f | control.h |
 | FIXED_PWM_DUTY | 600 | control.c:11 |
-| CASCADE_PID | 2 (default) | pid.h:5 |
+| CASCADE_PID | 2 (默认) | pid.h:5 |
 
-## Known Pitfalls & Lessons Learned
+## 已知陷阱和经验
 
-### C251 Compiler
-- **All variables must be declared at block start** — `int16_t x;` before any `if`/`for`/assignment. Declaration-after-statement = syntax error cascade.
-- `(void)param;` to suppress unused-parameter warnings, NOT `param = param;`
+### C251 编译器
+- **所有变量必须在块开头声明** — `int16_t x;` 必须在任何 `if`/`for`/赋值之前。声明后语句 = 语法错误级联
+- `(void)param;` 抑制未使用参数警告, 不要用 `param = param;`
+- **大局部数组必须声明为 `static`** — 8051 内部 RAM 只有 256 字节, `int HistGram[256]` 这样的局部数组会栈溢出导致编译错误 (C25: syntax error near ';')
 
-### Vision / Edge Extraction
-- `find_widest_run_0()` finds the WIDEST track segment per row — wrong in turns where lane is nearly horizontal (entire image width looks like "track"). Use `find_nearest_run_0()` for fallback when `last_mid` expansion fails.
-- **Boundary-touching segments**: when `l <= 2` or `r >= 185`, that edge is likely the image boundary, not a real lane edge. Mark as unknown (-1) so `fill_missing_edges_by_width()` fills it with median lane width.
-- `project_edges_through_cross()` — 检测到 CROSS 后，用锚点区域的直线趋势外推替换碰边界的边缘，使中线平滑穿过十字
+### VOFA+ 图像传输
+- `debug_main()` 调用 `track_handle()` → `vision_poll_track()` 处理帧, 设置 `g_track_valid`
+- 然后 `vofa_image_task()` 发送 3 张图: 原始灰度 (ID=1), 二值化伪彩 (ID=3), 灰度叠加中线 (ID=2)
+- `render_pseudo_gray()`: 赛道(0)→220(亮灰), 背景(255)→40(暗灰)
+- `render_overlay_mid()`: 拷贝原始灰度, 逐行画 `track->mid[]` 中点, 画当前 center 十字标记
+- USB CDC 发送: `vofa_sendGrayscaleImageEx()` 格式 `\nimage:id,size,w,h,bpp\n` + 原始像素数据
 
-### Trail / Element Classification
-- `plan_straight_center` weights: `(near_mid + far_mid * 2) / 3` — favors far point (67%) for smoother tracking
-- `plan_turn_center`: shifts target toward INSIDE of turn by `TRACK_TURN_SHIFT/2` (14px) plus `lane_w/2`
-- Cross detection: `base_w` computed from bottom rows (HEIGHT-25 to HEIGHT-5), not middle. Threshold: `w > base_w + base_w/3`
-- Turn detection: `dx > lane_w/6` (was lane_w/5), requires ≥9 rows with edge lost
+### 视觉 / 边缘提取
+- Moore 追踪 (`Search_L_R`): 左边界用顺时针 8 邻域种子, 右边界用逆时针, 同步逻辑防止左右交叉
+- 同步规则: 右边比左边高时左边等待, 左边方向=7(正上)且高于右边时左边回退
+- 停滞检测: 连续 3 次同一点 → 退出追踪
+- `Get_Left` 输出 `L_Border = Points_L[j][0] + 1`, `Get_Right` 输出 `R_Border = Points_R[j][0] - 1` (边界点在边界上, 向内偏移 1px)
+- 种子点找不到时: 左边界=1, 右边界=186, 中线≈94, 车辆直行
 
-### Control
-- Servo `servo_task()` is **never called** in main loop — KEY2-4 servo adjustments are unreachable
-- `gyro_target = yaw` only set on BROKEN_RODE entry; gyro NOT used for normal steering
-- Emergency recovery: scans bottom half for single-side edge data, applies full-lock steering toward visible side
+### 十字路口处理 (Cross_Fill)
+- 触发条件: `Lose_Line() == 1` (左右边界在中间 40 行范围内各 ≥10 行碰边界)
+- 拐点检测: 连续 3 点变化 ≤5, 断点变化 ≥7
+- 4 种工况:
+  1. 四拐点都找到 → 左右边分别直线拟合填充
+  2. 左斜十字 (左两拐点+右上拐点) → 左边填充, 右边用上方趋势外推到底部
+  3. 右斜十字 (右上+右下+左上) → 镜像处理
+  4. 只有上拐点 → 用上方边界趋势外推到底部
+- `Image_Flag_Cross_Fill`: 每帧清零, Case 1-3 设为 1, Case 4 设为 2, 否则保持 0
+- 中线 = (L+R)/2, Cross_Fill 已在边界层面处理, 中线直接计算无需额外逻辑
 
-### System / Debugging
-- **LED (PB6) not blinking = `System_Init()` hung** before reaching `main()` while loop
-- Most likely hang: SPI_2 transfer waiting for `SPI2STAT & 0x80` flag (ICM42686 not responding)
-- If no "ICM42686 FOUND!" or "ICM42686 Init Error!" prints = hang in first SPI read of `check_id`
-- ICM42686 example code works = hardware is fine, problem is in smartcar init chain
-- Init order: `key → vision(Mt9v034) → icm(IMU) → motor → encoder → servo → control`
+### Trail / 元素分类
+- `plan_straight_center` 权重: `(near_mid + far_mid * 2) / 3` — 偏好远点 (67%) 使循迹更平滑
+- `plan_turn_center`: 向弯道内侧偏移 `TRACK_TURN_SHIFT/2` (14px) + `lane_w/2`
+- 十字检测: `base_w` 从底部行 (HEIGHT-25 到 HEIGHT-5) 计算, 非中间行。阈值: `w > base_w + base_w/3`
+- 弯道检测: `dx > lane_w/6` (原 lane_w/5), 需要 ≥9 行丢边
 
-### Files NOT to modify
-- `pid.h` / `pid.c` struct definitions — mature, user-rejected changes
+### 控制
+- 舵机 `servo_task()` **从未在主循环中调用** — KEY2-4 舵机调整不可达
+- `gyro_target = yaw` 仅在 BROKEN_RODE 入口设置; 陀螺仪不用于普通转向
+- 紧急恢复: 扫描下半部单边数据, 向可见侧打满舵
 
-## 十字路口处理逻辑
+### 系统 / 调试
+- **LED (PB6) 不闪烁 = `System_Init()` 挂死** 在到达 `main()` while 循环之前
+- 最可能的挂死点: SPI_2 传输等待 `SPI2STAT & 0x80` 标志 (ICM42686 不响应)
+- 如果没有 "ICM42686 FOUND!" 或 "ICM42686 Init Error!" 打印 = 卡在第一次 SPI 读 `check_id`
+- ICM42686 示例代码工作 = 硬件正常, 问题在 smartcar 初始化链
+- 初始化顺序: `key → vision(Mt9v034) → icm(IMU) → motor → encoder → servo → control`
 
-### CROSS 检测（classify_feature）
-- CROSS 检测使用的边界判断阈值是 **4px**，不是 `VISION_EDGE_NEAR_TH=2`
-- 原因：MT9V034 摄像头镜头渐晕（vignette）在 x=183-187 产生伪边界，`r=184` 的行需要被视为碰边界
-- 条件：`w > 150（CROSS_WIDE_TH）` 且 `l <= 4` 或 `r >= 183`，连续满足 ≥6 行判定为 CROSS
-- 滞回：C 代码中 `cross_hold=4`，检测到 CROSS 后保持 4 帧
-
-### project_edges_through_cross() — 锚点趋势外推
-功能：检测到 CROSS 后，替换碰边界的边缘为锚点区域的直线拟合投影。
-
-算法步骤：
-1. **找锚点区域**：扫描所有行，收集左右边都不碰边界的行（`l > 4 AND r < 183`）。取最大连续块，需要 ≥20 行，否则跳过
-2. **直线拟合**：在锚点区域分别对左边缘和右边缘用最小二乘拟合 `x = k*y + b`，采用 Q10 定点运算
-3. **逐行外推**：
-   - 缺边行 → 直接用投影值填充
-   - 碰边界行（`l <= 4 || r >= 183`）→ 用投影值替换
-   - 不碰边界但离锚点区域超过 5 行且中心偏差 >15px → 也用投影值替换
-4. 投影值 clamp 到 `[0, 187]`，确保 `l < r`
-
-### 锚点区域注意事项
-- 锚点必须是非碰边界的连续可靠行段（通常在 y=32-96）
-- 锚点行左边缘 >4，右边缘 <183
-- 十字臂残留行（y=0-31，顶部十字臂）会被排除，因为它们虽然不碰边界，但中心偏移且宽度异常
-- 锚点不够（<20行）时不处理，保持原始边缘
-
-### 管线流程差异
-- **CROSS 帧**：`classify_feature()` → `project_edges_through_cross()` → `rebuild_mid_from_edge_chains()` → `compute_center_error()`
-- **非 CROSS 帧**：`classify_feature()` → `fix_boundary_zones()` / `trace_edges_incremental()` → `rebuild_mid_from_edge_chains()` → `compute_center_error()`
-- Python 评估脚本中，CROSS 帧会跳过 `trace_edges_incremental()`，因为 2D 骨架追踪会把十字路口当成一个宽区域处理，中心会被拉到图像中心（94），而不是车道原中心（99）
+### 禁止修改的文件
+- `pid.h` / `pid.c` 结构体定义 — 成熟架构, 用户已拒绝修改

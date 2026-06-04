@@ -31,7 +31,8 @@ typedef struct
 	int16_t b_q8;
 } display_line_q8_t;
 
-static vision_track_result_t g_vofa_track;
+extern vision_track_result_t g_track;
+extern uint8_t g_track_valid;
 extern image_t image_data[MT9V034_HEIGHT * MT9V034_WIDTH];
 
 static display_point_t g_left_chain[DISPLAY_MAX_CHAIN_POINTS];
@@ -661,60 +662,184 @@ static void draw_boundary_chains(uint8_t *out)
 	}
 }
 
+// Draw a single pixel if in bounds
+static void overlay_pixel(uint8_t *out, int16_t px, int16_t py, uint8_t val)
+{
+	if (px < 0 || px >= (int16_t)MT9V034_WIDTH || py < 0 || py >= (int16_t)MT9V034_HEIGHT)
+		return;
+	out[(uint16_t)py * MT9V034_WIDTH + (uint16_t)px] = val;
+}
+
+// Draw a cross marker for corner points (3px arms)
+static void draw_corner_cross(uint8_t *out, int16_t cx, int16_t cy, uint8_t val)
+{
+	int8_t d;
+	for (d = -3; d <= 3; d++)
+	{
+		overlay_pixel(out, (int16_t)(cx + d), cy, val);
+		overlay_pixel(out, cx, (int16_t)(cy + d), val);
+	}
+}
+
+// Draw BEV midline point set as dark dots
+static void draw_bev_midline_overlay(uint8_t *out, const vision_track_result_t *track)
+{
+	uint8_t i;
+	for (i = 0; i < track->mid_step; i++)
+	{
+		int16_t px;
+		int16_t py;
+		px = (int16_t)track->mid_pts[i][0];
+		py = (int16_t)track->mid_pts[i][1];
+		// Draw 2x2 dot for visibility
+		overlay_pixel(out, px, py, 0);
+		overlay_pixel(out, (int16_t)(px + 1), py, 0);
+		overlay_pixel(out, px, (int16_t)(py + 1), 0);
+		overlay_pixel(out, (int16_t)(px + 1), (int16_t)(py + 1), 0);
+	}
+}
+
+// Draw BEV boundary points (left=dark, right=bright dots)
+static void draw_bev_boundaries_overlay(uint8_t *out, const vision_track_result_t *track)
+{
+	uint8_t i;
+	int16_t px;
+	int16_t py;
+
+	for (i = 0; i < track->left_bev_step; i++)
+	{
+		px = (int16_t)track->left_bev[i][0];
+		py = (int16_t)track->left_bev[i][1];
+		overlay_pixel(out, px, py, 30);
+		overlay_pixel(out, (int16_t)(px + 1), py, 30);
+	}
+	for (i = 0; i < track->right_bev_step; i++)
+	{
+		px = (int16_t)track->right_bev[i][0];
+		py = (int16_t)track->right_bev[i][1];
+		overlay_pixel(out, px, py, 200);
+		overlay_pixel(out, (int16_t)(px + 1), py, 200);
+	}
+}
+
+// Draw per-row mid[] array directly as dots (row by row)
+static void draw_per_row_mid_overlay(uint8_t *out, const vision_track_result_t *track)
+{
+	uint16_t y;
+	int16_t prev_valid;
+	uint8_t has_prev;
+
+	has_prev = 0;
+	prev_valid = 0;
+
+	for (y = 0; y < MT9V034_HEIGHT; y++)
+	{
+		int16_t m;
+		m = track->mid[(uint16_t)y];
+		if (m >= 0 && m < (int16_t)MT9V034_WIDTH)
+		{
+			// Draw 3-pixel bar
+			overlay_pixel(out, m, (int16_t)y, 0);
+			if (m > 0) overlay_pixel(out, (int16_t)(m - 1), (int16_t)y, 0);
+			if (m < (int16_t)(MT9V034_WIDTH - 1)) overlay_pixel(out, (int16_t)(m + 1), (int16_t)y, 0);
+
+			// Fill gap from previous valid row
+			if (has_prev)
+			{
+				int16_t dm;
+				dm = (int16_t)(m - prev_valid);
+				if (dm < 0) dm = (int16_t)(-dm);
+				if (dm > 1 && dm < 50)
+				{
+					uint8_t k;
+					for (k = 1; k < (uint8_t)dm; k++)
+					{
+						int16_t mx;
+						mx = (int16_t)(prev_valid + (int16_t)((m - prev_valid) * (int16_t)k / dm));
+						overlay_pixel(out, mx, (int16_t)y, 0);
+					}
+				}
+			}
+			prev_valid = m;
+			has_prev = 1;
+		}
+		else
+		{
+			has_prev = 0;
+		}
+	}
+}
+
+static void draw_current_center_overlay(uint8_t *out, const vision_track_result_t *track)
+{
+	int16_t cx;
+	int16_t cy;
+
+	if (track->center_x < 0 || track->center_x >= (int16_t)MT9V034_WIDTH)
+	{
+		return;
+	}
+
+	cx = track->center_x;
+	cy = (int16_t)VISION_LOOKAHEAD_Y;
+	if (cy < 0)
+	{
+		cy = 0;
+	}
+	if (cy >= (int16_t)MT9V034_HEIGHT)
+	{
+		cy = (int16_t)(MT9V034_HEIGHT - 1);
+	}
+
+	draw_corner_cross(out, cx, cy, 0);
+}
+
 static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_track_result_t *track)
 {
-	build_boundary_chains(track);
-	build_center_chain_from_boundaries(track);
 	memcpy(out, gray, MT9V034_IMAGE_SIZE);
-	draw_boundary_chains(out);
-	draw_center_chain(out);
-	draw_reference_lines(out);
+
+	draw_per_row_mid_overlay(out, track);
+	draw_bev_boundaries_overlay(out, track);
+	draw_bev_midline_overlay(out, track);
+	draw_current_center_overlay(out, track);
 }
 
 static void render_pseudo_gray(uint8_t *out, const uint8_t *bin, const vision_track_result_t *track)
 {
 	uint16_t i;
 
-	build_boundary_chains(track);
-	build_center_chain_from_boundaries(track);
+	(void)track;
 
 	for (i = 0; i < MT9V034_IMAGE_SIZE; i++)
 	{
 		out[i] = (bin[i] == 0) ? 220 : 40;
 	}
-
-	draw_boundary_chains(out);
-	draw_center_chain(out);
-	draw_reference_lines(out);
 }
 
 void vofa_image_task(void)
 {
-	if (mt9v034_frame_ready)
-	{
-		// 一次处理，三张图复用 g_vofa_track 和 image_data
-		vision_track_process((const uint8_t *)mt9v034_image, (uint8_t *)image_data, &g_vofa_track);
+	if (!g_track_valid)
+		return;
 
-		// 1. 原始灰度图
-		vofa_sendGrayscaleImageEx((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
+	// 1. 原始灰度图
+	vofa_sendGrayscaleImageEx((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
 #if (WIRELESS_IMAGE_OUTPUT == 1)
-		wireless_vision_send_image((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
+	wireless_vision_send_image((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
 #endif
 
-		// 2. 二值化伪彩图（image_data 当前是二值化结果，render_pseudo_gray 原地转换）
-		render_pseudo_gray((uint8_t *)image_data, (const uint8_t *)image_data, &g_vofa_track);
-		vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
+	// 2. 二值化伪彩图（image_data 已由 vision_poll_track 写入，原地转换）
+	render_pseudo_gray((uint8_t *)image_data, (const uint8_t *)image_data, &g_track);
+	vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
 #if (WIRELESS_IMAGE_OUTPUT == 1)
-		wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
+	wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
 #endif
 
-		// 3. 灰度叠加中线图（覆盖 image_data）
-		render_overlay_mid((uint8_t *)image_data, (const uint8_t *)mt9v034_image, &g_vofa_track);
-		vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
+	// 3. 灰度叠加中线图（覆盖 image_data，源图为原始灰度）
+	render_overlay_mid((uint8_t *)image_data, (const uint8_t *)mt9v034_image, &g_track);
+	vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
 #if (WIRELESS_IMAGE_OUTPUT == 1)
-		wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
+	wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
 #endif
 
-		mt9v034_frame_ready = 0;
-	}
+	g_track_valid = 0;
 }

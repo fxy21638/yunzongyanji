@@ -107,6 +107,23 @@ extern "C"
 #define VISION_CENTER_HOLD_FRAMES 3u
 #endif
 
+// Compile-time switch: wall-following disabled (migrated to Image.c Search_L_R pipeline)
+#ifndef VISION_USE_WALLFOLLOW
+#define VISION_USE_WALLFOLLOW 0
+#endif
+
+#define VISION_PTS_MAX (MT9V034_WIDTH)
+
+// Corner point data (detected拐点 on a boundary)
+typedef struct
+{
+    uint8_t img_pt[2];   // corner position in original image (x, y)
+    uint8_t bev_pt[2];   // corner position in bird's-eye view (x, y)
+    uint8_t pts_idx;     // index in the point set array
+    int16_t angle_q7;    // local angle at corner (radians × 128)
+    uint8_t is_valid;    // 1 = valid corner detected
+} vision_corner_t;
+
 typedef enum
 {
     VISION_FEATURE_NORMAL = 0,
@@ -128,12 +145,49 @@ typedef struct
 
     uint8_t valid_rows;
 
+    // Per-row boundary arrays (image space, for backward compatibility)
     int16_t left[MT9V034_HEIGHT];
     int16_t right[MT9V034_HEIGHT];
     int16_t mid[MT9V034_HEIGHT];
+
+    // Sparse point sets (image space, ordered bottom→top)
+    uint8_t left_pts[VISION_PTS_MAX][2];
+    uint8_t left_step;
+    uint8_t right_pts[VISION_PTS_MAX][2];
+    uint8_t right_step;
+
+    // Bird's-eye view point sets (after perspective transform)
+    uint8_t left_bev[VISION_PTS_MAX][2];
+    uint8_t left_bev_step;
+    uint8_t right_bev[VISION_PTS_MAX][2];
+    uint8_t right_bev_step;
+
+    // Midline point set (bird's-eye view)
+    uint8_t mid_pts[VISION_PTS_MAX][2];
+    uint8_t mid_step;
+
+    // Distance from each midline point to vehicle (94, 120)
+    int16_t mid_dist[VISION_PTS_MAX];
+
+    // Lane width estimate (pixels at bottom of image)
+    int16_t lane_width;
+
+    // Corner points on left/right boundaries
+    vision_corner_t corner_l;
+    vision_corner_t corner_r;
+
+    // Visible track distance (highest row with valid edge)
+    uint8_t visible_high;
 } vision_track_result_t;
 
-void vision_track_process(const uint8_t *gray, uint8_t *bin, vision_track_result_t *res);
+void vision_track_process(uint8_t *gray, uint8_t *bin, vision_track_result_t *res);
+
+// 浮点数学函数 (C251 无标准 libm)
+float sqrtf(float x);
+float atan2f(float y, float x);
+
+// 三点 Menger 曲率 (×1000), 正值右转, 负值左转
+int16_t pts_curvature_3pt(const uint8_t p0[2], const uint8_t p1[2], const uint8_t p2[2]);
 
 #ifdef __cplusplus
 }

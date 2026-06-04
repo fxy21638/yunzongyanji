@@ -40,9 +40,16 @@ extern TRACK_ELEMENT current_element;
 extern uint8_t track_midpoint_target;
 extern uint8_t track_midpoint_target_P;
 
+// Pure Pursuit outputs (for control.c)
+extern float pp_steering_angle;   // steering angle from Pure Pursuit (degrees)
+extern float pp_lookahead_dist;   // current lookahead distance (pixels)
+extern float pp_curvature;        // estimated road curvature (1/radius)
+extern uint8_t pp_visible_high;   // visible track distance (rows)
+
 TRACK_ELEMENT track_element_judge(void);
 void state_display(void);
 void track_handle(void);
 void track_straight_target(uint8_t position);
+float trail_speed_factor(void);
 
 #endif

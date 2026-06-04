@@ -1,4 +1,6 @@
-// 视觉循迹核心算法：阈值 → 二值化 → 形态学 → 提边界 → 特征分类 → 十字补线 → 中心误差
+// 视觉循迹核心算法 — 基于 Moore 邻域追踪的双边同步边界提取
+// 内部二值化约定: 赛道=255(白), 背景=0(黑), 输出前翻转为 YG 约定 (赛道=0)
+// 外部接口 vision_track_result_t 使用 x 坐标, 无极性依赖
 
 #ifndef __INTELLISENSE__
 #include "ky_headfile.h"
@@ -14,1448 +16,1072 @@
 #endif
 
 /* ============================================================
- * 内部宏
+ * 188×120 适配常量
  * ============================================================ */
-#define VISION_W                ((uint16_t)MT9V034_WIDTH)
-#define VISION_H                ((uint16_t)MT9V034_HEIGHT)
-#define VISION_SIZE             ((uint16_t)(MT9V034_WIDTH * MT9V034_HEIGHT))
+#define IMG_W               ((uint16_t)MT9V034_WIDTH)   // 188
+#define IMG_H               ((uint16_t)MT9V034_HEIGHT)  // 120
+#define IMG_SIZE            ((uint16_t)(IMG_W * IMG_H))
 
-#define VISION_SAMPLE_STEP      1u
-#define VISION_MIN_RUN_LEN      3u
+#define BORDER_MAX          (IMG_W - 2)   // 186
+#define BORDER_MIN          1
 
-#define VISION_CROSS_WIDE_TH_NUM (VISION_W * 8 / 10)
-#define VISION_CROSS_END_TH_NUM  (VISION_W * 7 / 10)
-#define VISION_EDGE_NEAR_TH      2
+#define USE_NUM             ((uint16_t)(IMG_H * 3))  // 360
 
-#define VISION_CONTOUR_MAX_POINTS (4u * (MT9V034_WIDTH + MT9V034_HEIGHT))
+#define WHITE_PIXEL         255
+#define BLACK_PIXEL         0
+
+// Image_Filter 8邻域和阈值
+#define THRESHOLD_MAX       (255u * 5u)
+#define THRESHOLD_MIN       (255u * 2u)
+
+// Lose_Line 丢线判断 (R_Border >= IMG_W-4=184 视为丢线)
+#define LOSE_LINE_R_TH      (IMG_W - 4)   // 184
+#define LOSE_LINE_L_TH      2
+
+// Straight_Line_Judge 直线判断计数 (原 60, 按比例: 60*120/80=90)
+#define STRAIGHT_LINE_CNT   90
+
+// Image_Erro 前瞻行 (原 row 69-71, 比例缩放: 69*120/80≈103, 71*120/80≈106)
+#define ERRO_ROW_LO         103
+#define ERRO_ROW_MID        105
+#define ERRO_ROW_HI         106
+
+// Cross_Fill 搜索范围
+#define CROSS_SEARCH_UP     (IMG_H / 2 + 35)  // 95 (原 Image_H/2+35=75)
+#define CROSS_SEARCH_DOWN   (IMG_H / 2 - 5)   // 55 (原 Image_H/2-5=35)
 
 /* ============================================================
  * 静态状态
  * ============================================================ */
-static uint16_t g_contour_points[VISION_CONTOUR_MAX_POINTS][2];
-static int16_t  g_last_center_x = -1;
-static uint8_t  g_center_hold_cnt = 0;
+static uint8_t L_Border[IMG_H];
+static uint8_t R_Border[IMG_H];
+static uint8_t Center_Line_arr[IMG_H];
+static uint8_t Hightest;
 
-// 八邻域偏移表（Moore 邻域），顺时针
-static const signed char nb8[8][2] = {
-    {-1, -1}, {0, -1}, {1, -1}, {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}
+static uint16_t Points_L[USE_NUM][2];
+static uint16_t Points_R[USE_NUM][2];
+static uint16_t Dir_L[USE_NUM];
+static uint16_t Dir_R[USE_NUM];
+static uint16_t Data_Stastics_L;
+static uint16_t Data_Stastics_R;
+
+static uint8_t Start_Point_L[2];
+static uint8_t Start_Point_R[2];
+
+static int g_HistGram[256];
+
+// Otsu 工作变量 (避免 C251 局部变量过多导致栈溢出)
+static uint16_t g_Otsu_W, g_Otsu_H;
+static int g_Otsu_X;
+static uint16_t g_Otsu_Y;
+static uint8_t *g_Otsu_Data;
+static uint32_t g_Otsu_Amount;
+static uint32_t g_Otsu_PixelBack;
+static uint32_t g_Otsu_PixelIntegralBack;
+static uint32_t g_Otsu_PixelIntegral;
+static int32_t g_Otsu_PixelIntegralFore;
+static int32_t g_Otsu_PixelFore;
+static double g_Otsu_OmegaBack, g_Otsu_OmegaFore;
+static double g_Otsu_MicroBack, g_Otsu_MicroFore;
+static double g_Otsu_SigmaB, g_Otsu_Sigma;
+static uint8_t g_Otsu_MinVal, g_Otsu_MaxVal;
+static uint8_t g_Otsu_Threshold;
+static uint8_t g_Otsu_iClear;
+
+static uint8_t Image_Flag_Cross_Fill;
+static uint8_t Image_Flag_Get_Start_Point;
+
+static int16_t g_last_center_x = -1;
+
+// Moore 邻域种子 (左边顺时针, 右边逆时针)
+// 左边顺时针
+static const int8_t Seeds_L[8][2] = {
+    {0,  1}, {-1, 1}, {-1, 0}, {-1, -1},
+    {0, -1}, {1, -1}, {1,  0}, {1,  1}
+};
+// 右边逆时针
+static const int8_t Seeds_R[8][2] = {
+    {0,  1}, {1, 1}, {1, 0}, {1, -1},
+    {0, -1}, {-1, -1}, {-1, 0}, {-1, 1}
 };
 
 /* ============================================================
  * 工具函数
  * ============================================================ */
 
-static uint8_t clamp_u8(long v)
+static int My_Abs(int value)
 {
-    if (v < 0)   return 0;
-    if (v > 255) return 255;
-    return (uint8_t)v;
+    if (value >= 0) return value;
+    else return -value;
 }
 
-static int16_t clamp_i16(int16_t v, int16_t lo, int16_t hi)
+static int16_t Limit_a_b(int16_t x, int a, int b)
 {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
-
-static uint16_t abs_i16_to_u16(int16_t v)
-{
-    return (uint16_t)((v < 0) ? -v : v);
-}
-
-static uint8_t in_bounds(int16_t x, int16_t y)
-{
-    return (x >= 0 && y >= 0 && x < (int16_t)VISION_W && y < (int16_t)VISION_H);
-}
-
-static uint8_t bin_at(const uint8_t *bin, int16_t x, int16_t y)
-{
-    if (!in_bounds(x, y)) return 255;
-    return bin[(uint16_t)y * VISION_W + (uint16_t)x];
+    if (x < a) x = (int16_t)a;
+    if (x > b) x = (int16_t)b;
+    return x;
 }
 
 /* ============================================================
- * 阈值计算
+ * 浮点数学函数 (C251 无标准库 libm, 从 point_set 迁移)
  * ============================================================ */
 
-static uint8_t compute_threshold_isodata(const uint8_t *gray)
+// Newton 法求平方根
+float sqrtf(float x)
 {
-    unsigned long sum = 0, cnt = 0;
-    uint16_t x, y;
-
-    for (y = 0; y < VISION_H; y += VISION_SAMPLE_STEP)
+    float y;
+    uint8_t i;
+    if (x <= 0.0f) return 0.0f;
+    y = (x > 1.0f) ? x : 1.0f;
+    for (i = 0; i < 8; i++)
     {
-        const uint8_t *row = &gray[y * VISION_W];
-        for (x = 0; x < VISION_W; x += VISION_SAMPLE_STEP)
-        {
-            sum += row[x];
-            cnt++;
-        }
+        y = (y + x / y) * 0.5f;
     }
-
-    if (cnt == 0) return 128;
-
-    {
-        uint8_t thr = (uint8_t)(sum / cnt);
-        uint8_t iter;
-        for (iter = 0; iter < 4; iter++)
-        {
-            unsigned long sum_low = 0, cnt_low = 0;
-            unsigned long sum_high = 0, cnt_high = 0;
-
-            for (y = 0; y < VISION_H; y += VISION_SAMPLE_STEP)
-            {
-                const uint8_t *row = &gray[y * VISION_W];
-                for (x = 0; x < VISION_W; x += VISION_SAMPLE_STEP)
-                {
-                    uint8_t v = row[x];
-                    if (v < thr) { sum_low += v;  cnt_low++; }
-                    else         { sum_high += v; cnt_high++; }
-                }
-            }
-
-            if (cnt_low == 0 || cnt_high == 0) break;
-            thr = (uint8_t)(((sum_low / cnt_low) + (sum_high / cnt_high)) / 2);
-        }
-        return thr;
-    }
+    return y;
 }
 
-// Otsu 大津法：直方图 + 最大类间方差。
-// 为兼容 C251（无 long long），对 diff^2 做右移缩放避免 32 位溢出。
-static uint8_t compute_threshold_otsu(const uint8_t *gray)
+// Padé [2/4] 反正切逼近 (|z|<=1, max error < 0.0009 rad)
+static float atan_approx(float z)
 {
-    static uint16_t hist[256];
-    uint16_t i, x, y;
-    unsigned long total = 0, sum = 0;
-
-    for (i = 0; i < 256; i++) hist[i] = 0;
-    for (y = 0; y < VISION_H; y += VISION_SAMPLE_STEP)
-    {
-        const uint8_t *row = &gray[y * VISION_W];
-        for (x = 0; x < VISION_W; x += VISION_SAMPLE_STEP)
-            hist[row[x]]++;
-    }
-
-    for (i = 0; i < 256; i++)
-    {
-        total += (unsigned long)hist[i];
-        sum   += (unsigned long)i * (unsigned long)hist[i];
-    }
-    if (total == 0) return 128;
-
-    {
-        unsigned long wB = 0, sumB = 0;
-        unsigned long best_score = 0;
-        uint8_t best_thr = 128;
-        unsigned long wF, diff2, score;
-        uint16_t mB, mF;
-        long diff;
-
-        for (i = 0; i < 256; i++)
-        {
-            wB   += (unsigned long)hist[i];
-            sumB += (unsigned long)i * (unsigned long)hist[i];
-            if (wB == 0) continue;
-
-            wF = total - wB;
-            if (wF == 0) break;
-
-            mB = (uint16_t)(sumB / wB);
-            mF = (uint16_t)((sum - sumB) / wF);
-            diff = (long)mB - (long)mF;
-            diff2 = (unsigned long)(diff * diff);
-
-            score = (wB * wF) * (diff2 >> 10);
-            if (score >= best_score)
-            {
-                best_score = score;
-                best_thr = (uint8_t)i;
-            }
-        }
-        return best_thr;
-    }
+    float z2, z4, num, den;
+    z2 = z * z;
+    z4 = z2 * z2;
+    num = z * (1.0f + 0.07735027027f * z2);
+    den = 1.0f + 0.41035027027f * z2 + 0.08753400568f * z4;
+    return num / den;
 }
 
-#if (VISION_TRACK_POLARITY == VISION_TRACK_POLARITY_AUTO)
-// 自动极性：统计底部 1/3 区域暗像素占比。
-// ratio < 45% → 赛道暗；ratio > 65% → 赛道亮（反相）
-static uint8_t decide_track_is_dark(const uint8_t *gray, uint8_t thr)
+// 四象限反正切, 返回 radian 值 [-PI, PI]
+float atan2f(float y, float x)
 {
-    unsigned long dark_cnt = 0, total = 0;
-    uint16_t y0 = (uint16_t)(VISION_H * 2 / 3);
-    uint16_t x, y;
+    float pi, half_pi;
+    pi     = 3.14159265358979f;
+    half_pi = 1.5707963267949f;
 
-    for (y = y0; y < VISION_H; y += VISION_SAMPLE_STEP)
+    if (x == 0.0f)
     {
-        const uint8_t *row = &gray[y * VISION_W];
-        for (x = 0; x < VISION_W; x += VISION_SAMPLE_STEP)
-        {
-            if (row[x] < thr) dark_cnt++;
-            total++;
-        }
+        if (y > 0.0f) return half_pi;
+        if (y < 0.0f) return -half_pi;
+        return 0.0f;
     }
 
-    if (total == 0) return 1;
+    if (x > 0.0f)
+        return atan_approx(y / x);
+    else if (y >= 0.0f)
+        return atan_approx(y / x) + pi;
+    else
+        return atan_approx(y / x) - pi;
+}
 
-    unsigned long ratio_x100 = (dark_cnt * 100u) / total;
-    if (ratio_x100 < 45u) return 1;
-    if (ratio_x100 > 65u) return 0;
+// Menger 曲率 (×1000), 三点确定圆: K = 4*面积/(a*b*c)
+// 返回值: 正值右转, 负值左转
+int16_t pts_curvature_3pt(const uint8_t p0[2], const uint8_t p1[2], const uint8_t p2[2])
+{
+    float dx10, dy10, dx20, dy20, dx21, dy21;
+    float area, a, b, c, denom, curv;
+    float f01, f02, f12;
+
+    dx10 = (float)p1[0] - (float)p0[0];
+    dy10 = (float)p1[1] - (float)p0[1];
+    dx20 = (float)p2[0] - (float)p0[0];
+    dy20 = (float)p2[1] - (float)p0[1];
+    dx21 = (float)p2[0] - (float)p1[0];
+    dy21 = (float)p2[1] - (float)p1[1];
+
+    area = 0.5f * (dx10 * dy20 - dx20 * dy10);
+    if (area < 0.0f) area = -area;
+    if (area < 1e-6f) return 0;
+
+    f01 = dx10 * dx10 + dy10 * dy10;
+    f02 = dx20 * dx20 + dy20 * dy20;
+    f12 = dx21 * dx21 + dy21 * dy21;
+    a = sqrtf(f01);
+    b = sqrtf(f02);
+    c = sqrtf(f12);
+
+    denom = a * b * c;
+    if (denom < 1e-6f) return 0;
+
+    curv = 4.0f * area / denom;
+    return (int16_t)((float)((dx10 * dy20 - dx20 * dy10) > 0.0f ? curv : -curv) * 1000.0f);
+}
+
+// 最小二乘斜率
+static float Slope_Calculate(uint8_t begin, uint8_t end, uint8_t *border)
+{
+    float xsum, ysum, xysum, x2sum;
+    int16_t i;
+    float result;
+    static float resultlast;
+    float denom;
+
+    xsum = 0.0f; ysum = 0.0f; xysum = 0.0f; x2sum = 0.0f;
+
+    for (i = (int16_t)begin; i < (int16_t)end; i++)
+    {
+        xsum  += (float)i;
+        ysum  += (float)border[i];
+        xysum += (float)i * (float)(border[i]);
+        x2sum += (float)i * (float)i;
+    }
+    denom = ((float)(end - begin) * x2sum - xsum * xsum);
+    if (denom != 0.0f)
+    {
+        result = ((float)(end - begin) * xysum - xsum * ysum) / denom;
+        resultlast = result;
+    }
+    else
+    {
+        result = resultlast;
+    }
+    return result;
+}
+
+// 两点求斜率截距
+static uint8_t Get_K_b(uint8_t x1, uint8_t y1, uint8_t x2, uint8_t y2,
+                       float *slope_rate, float *intercept)
+{
+    if (x1 == x2) return 0;
+
+    *slope_rate = (float)((int16_t)y2 - (int16_t)y1)
+                / (float)((int16_t)x2 - (int16_t)x1);
+    *intercept = (float)y1 - (*slope_rate * (float)x1);
     return 1;
 }
-#endif
 
 /* ============================================================
- * 二值化
+ * Otsu 大津法阈值 — 遍历灰度直方图最大化类间方差
  * ============================================================ */
-
-static void binarize_to_track0(const uint8_t *gray, uint8_t *bin, uint8_t thr, uint8_t track_is_dark)
+static uint8_t Otsu_Threshold(uint8_t *Image, uint16_t col, uint16_t row)
 {
-    uint16_t i;
-    if (track_is_dark)
+    g_Otsu_W = col;
+    g_Otsu_H = row;
+    g_Otsu_Data = Image;
+
+    for (g_Otsu_iClear = 0; g_Otsu_iClear < 255; g_Otsu_iClear++)
+        g_HistGram[g_Otsu_iClear] = 0;
+    g_HistGram[255] = 0;
+
+    for (g_Otsu_Y = 0; g_Otsu_Y < g_Otsu_H; g_Otsu_Y++)
     {
-        for (i = 0; i < VISION_SIZE; i++)
-            bin[i] = (gray[i] < thr) ? 0 : 255;
+        for (g_Otsu_X = 0; g_Otsu_X < (int)g_Otsu_W; g_Otsu_X++)
+        {
+            g_HistGram[(int)g_Otsu_Data[g_Otsu_Y * g_Otsu_W + g_Otsu_X]]++;
+        }
+    }
+
+    for (g_Otsu_MinVal = 0; g_Otsu_MinVal < 255 && g_HistGram[g_Otsu_MinVal] == 0; g_Otsu_MinVal++);
+    for (g_Otsu_MaxVal = 255; g_Otsu_MaxVal > g_Otsu_MinVal && g_HistGram[g_Otsu_MinVal] == 0; g_Otsu_MaxVal--);
+
+    if (g_Otsu_MaxVal == g_Otsu_MinVal) return g_Otsu_MaxVal;
+    if (g_Otsu_MinVal + 1 == g_Otsu_MaxVal) return g_Otsu_MinVal;
+
+    g_Otsu_Amount = 0;
+    for (g_Otsu_Y = g_Otsu_MinVal; g_Otsu_Y <= g_Otsu_MaxVal; g_Otsu_Y++)
+        g_Otsu_Amount += (uint32_t)g_HistGram[g_Otsu_Y];
+
+    g_Otsu_PixelIntegral = 0;
+    for (g_Otsu_Y = g_Otsu_MinVal; g_Otsu_Y <= g_Otsu_MaxVal; g_Otsu_Y++)
+        g_Otsu_PixelIntegral += (uint32_t)g_HistGram[g_Otsu_Y] * (uint32_t)g_Otsu_Y;
+
+    g_Otsu_SigmaB = -1.0;
+    g_Otsu_Threshold = 0;
+    g_Otsu_PixelBack = 0;
+    g_Otsu_PixelIntegralBack = 0;
+
+    for (g_Otsu_Y = g_Otsu_MinVal; g_Otsu_Y < g_Otsu_MaxVal; g_Otsu_Y++)
+    {
+        g_Otsu_PixelBack += (uint32_t)g_HistGram[g_Otsu_Y];
+        g_Otsu_PixelFore = (int32_t)(g_Otsu_Amount - g_Otsu_PixelBack);
+        g_Otsu_OmegaBack = (double)g_Otsu_PixelBack / (double)g_Otsu_Amount;
+        g_Otsu_OmegaFore = (double)g_Otsu_PixelFore / (double)g_Otsu_Amount;
+        g_Otsu_PixelIntegralBack += (uint32_t)g_HistGram[g_Otsu_Y] * (uint32_t)g_Otsu_Y;
+        g_Otsu_PixelIntegralFore = (int32_t)(g_Otsu_PixelIntegral - g_Otsu_PixelIntegralBack);
+        g_Otsu_MicroBack = (double)g_Otsu_PixelIntegralBack / (double)g_Otsu_PixelBack;
+        g_Otsu_MicroFore = (double)g_Otsu_PixelIntegralFore / (double)g_Otsu_PixelFore;
+        g_Otsu_Sigma = g_Otsu_OmegaBack * g_Otsu_OmegaFore
+                     * (g_Otsu_MicroBack - g_Otsu_MicroFore)
+                     * (g_Otsu_MicroBack - g_Otsu_MicroFore);
+        if (g_Otsu_Sigma > g_Otsu_SigmaB)
+        {
+            g_Otsu_SigmaB = g_Otsu_Sigma;
+            g_Otsu_Threshold = (uint8_t)g_Otsu_Y;
+        }
+    }
+    return g_Otsu_Threshold;
+}
+
+/* ============================================================
+ * Turn_To_Bin — 二值化 (Otsu*1.075, bright→255=track)
+ * ============================================================ */
+static void Turn_To_Bin(uint8_t *gray, uint8_t *bin, uint8_t *out_thr)
+{
+    uint8_t i, j;
+    uint8_t thr_raw;
+    float thr_f;
+
+    thr_raw = Otsu_Threshold(gray, IMG_W, IMG_H);
+    thr_f = 1.075f * (float)thr_raw;
+    if (thr_f > 254.0f) thr_f = 254.0f;
+    if (thr_f < 1.0f)   thr_f = 1.0f;
+    *out_thr = (uint8_t)thr_f;
+
+    for (i = 0; i < IMG_H; i++)
+    {
+        for (j = 0; j < IMG_W; j++)
+        {
+            if (gray[i * IMG_W + j] > (*out_thr))
+                bin[i * IMG_W + j] = WHITE_PIXEL;  // 赛道
+            else
+                bin[i * IMG_W + j] = BLACK_PIXEL;  // 背景
+        }
+    }
+}
+
+/* ============================================================
+ * Image_Filter — 8邻域和阈值滤波
+ * sum >= 255*5 → 填白(255), sum <= 255*2 → 填黑(0)
+ * ============================================================ */
+static void Image_Filter(uint8_t *bin)
+{
+    uint16_t i, j;
+    uint32_t num;
+
+    for (i = 1; i < (uint16_t)(IMG_H - 1); i++)
+    {
+        for (j = 1; j < (uint16_t)(IMG_W - 1); j++)
+        {
+            num = (uint32_t)bin[(i - 1) * IMG_W + (j - 1)]
+                + (uint32_t)bin[(i - 1) * IMG_W + j]
+                + (uint32_t)bin[(i - 1) * IMG_W + (j + 1)]
+                + (uint32_t)bin[i * IMG_W + (j - 1)]
+                + (uint32_t)bin[i * IMG_W + (j + 1)]
+                + (uint32_t)bin[(i + 1) * IMG_W + (j - 1)]
+                + (uint32_t)bin[(i + 1) * IMG_W + j]
+                + (uint32_t)bin[(i + 1) * IMG_W + (j + 1)];
+
+            if (num >= THRESHOLD_MAX && bin[i * IMG_W + j] == 0)
+                bin[i * IMG_W + j] = 255;
+            if (num <= THRESHOLD_MIN && bin[i * IMG_W + j] == 255)
+                bin[i * IMG_W + j] = 0;
+        }
+    }
+}
+
+/* ============================================================
+ * Image_Draw_Rectan — 画黑边框 (四周 2px 涂黑, 防止追踪跑到图像外)
+ * ============================================================ */
+static void Image_Draw_Rectan(uint8_t *bin)
+{
+    uint8_t i;
+
+    for (i = 0; i < IMG_H; i++)
+    {
+        bin[i * IMG_W + 0] = 0;
+        bin[i * IMG_W + 1] = 0;
+        bin[i * IMG_W + (IMG_W - 1)] = 0;
+        bin[i * IMG_W + (IMG_W - 2)] = 0;
+    }
+    for (i = 0; i < IMG_W; i++)
+    {
+        bin[i] = 0;                     // row 0
+        bin[IMG_W + i] = 0;             // row 1
+    }
+}
+
+/* ============================================================
+ * Get_Start_Point — 从中间向两边找黑白交界种子点
+ * ============================================================ */
+static uint8_t Get_Start_Point(uint8_t *bin, uint8_t Start_Row)
+{
+    uint8_t i;
+    uint8_t L_Found, R_Found;
+
+    L_Found = 0;
+    R_Found = 0;
+    Image_Flag_Get_Start_Point = 0;
+
+    Start_Point_L[0] = 0;
+    Start_Point_L[1] = 0;
+    Start_Point_R[0] = 0;
+    Start_Point_R[1] = 0;
+
+    // 从中间向左找: 白(赛道)在左, 黑在右 → 右边界
+    for (i = (uint8_t)(IMG_W / 2); i > BORDER_MIN; i--)
+    {
+        Start_Point_L[0] = i;
+        Start_Point_L[1] = Start_Row;
+        if (bin[Start_Row * IMG_W + i] == 255
+            && bin[Start_Row * IMG_W + (i - 1)] == 0)
+        {
+            L_Found = 1;
+            break;
+        }
+    }
+
+    // 从中间向右找: 白(赛道)在右, 黑在左 → 左边界
+    for (i = (uint8_t)(IMG_W / 2); i < BORDER_MAX; i++)
+    {
+        Start_Point_R[0] = i;
+        Start_Point_R[1] = Start_Row;
+        if (bin[Start_Row * IMG_W + i] == 255
+            && bin[Start_Row * IMG_W + (i + 1)] == 0)
+        {
+            R_Found = 1;
+            break;
+        }
+    }
+
+    if (L_Found && R_Found)
+    {
+        Image_Flag_Get_Start_Point = 1;
+        return 1;
     }
     else
     {
-        for (i = 0; i < VISION_SIZE; i++)
-            bin[i] = (gray[i] > thr) ? 0 : 255;
-    }
-}
-
-#if VISION_USE_SPLIT_THRESHOLD
-static uint8_t clamp_add_u8(uint8_t base, int8_t delta)
-{
-    int16_t v = (int16_t)base + (int16_t)delta;
-    if (v < 0)   return 0;
-    if (v > 255) return 255;
-    return (uint8_t)v;
-}
-
-// 分区阈值：远端（y < VISION_FAR_REGION_HEIGHT）使用 thr + offset
-static void binarize_to_track0_split(const uint8_t *gray, uint8_t *bin, uint8_t thr, uint8_t track_is_dark)
-{
-    uint16_t far_h = (uint16_t)VISION_FAR_REGION_HEIGHT;
-    int8_t   off   = (int8_t)VISION_FAR_THRESHOLD_OFFSET;
-    uint16_t x, y;
-
-    if (far_h > VISION_H) far_h = VISION_H;
-
-    for (y = 0; y < VISION_H; y++)
-    {
-        uint8_t thr_y = (y < far_h) ? clamp_add_u8(thr, off) : thr;
-        const uint8_t *row = &gray[y * VISION_W];
-        uint8_t       *out = &bin[y * VISION_W];
-
-        if (track_is_dark)
-        {
-            for (x = 0; x < VISION_W; x++)
-                out[x] = (row[x] < thr_y) ? 0 : 255;
-        }
-        else
-        {
-            for (x = 0; x < VISION_W; x++)
-                out[x] = (row[x] > thr_y) ? 0 : 255;
-        }
-    }
-}
-#endif
-
-/* ============================================================
- * 二值形态学
- * ============================================================ */
-
-#if VISION_BIN_DESPECKLE
-// 4-邻域去椒盐：孤立点（≥3 邻域不同）→ 背景
-static void bin_despeckle_4n(uint8_t *bin)
-{
-    uint16_t y, x;
-    for (y = 1; y < (uint16_t)(VISION_H - 1); y++)
-    {
-        for (x = 1; x < (uint16_t)(VISION_W - 1); x++)
-        {
-            uint16_t off = y * VISION_W + x;
-            uint8_t v = bin[off];
-            uint8_t diff = 0;
-
-            if (bin[off - VISION_W] != v) diff++;
-            if (bin[off + VISION_W] != v) diff++;
-            if (bin[off - 1] != v) diff++;
-            if (bin[off + 1] != v) diff++;
-
-            if (diff >= 3) bin[off] = 255;
-        }
-    }
-}
-#endif
-
-// 行内闭运算：填补赛道内的窄缝（背景被赛道包围）
-static void bin_close_small_gaps_row(uint8_t *bin)
-{
-    uint16_t gap_max = (uint16_t)VISION_BIN_CLOSE_GAP_MAX;
-    uint16_t y;
-
-    if (gap_max == 0) return;
-
-    for (y = 0; y < VISION_H; y++)
-    {
-        uint16_t row_off = (uint16_t)(y * VISION_W);
-        uint16_t x = 1;
-
-        while (x + 1 < VISION_W)
-        {
-            if (bin[row_off + x] != 255) { x++; continue; }
-
-            if (bin[row_off + (uint16_t)(x - 1)] == 0)
-            {
-                uint16_t s = x;
-                while (x < VISION_W && bin[row_off + x] == 255) x++;
-
-                if (x < VISION_W && bin[row_off + x] == 0)
-                {
-                    uint16_t e = (uint16_t)(x - 1);
-                    if ((uint16_t)(e - s + 1) <= gap_max)
-                    {
-                        uint16_t k;
-                        for (k = s; k <= e; k++) bin[row_off + k] = 0;
-                    }
-                }
-            }
-            else { x++; }
-        }
-    }
-}
-
-// 行内开运算：去除赛道边的小毛刺
-static void bin_open_small_spurs_row(uint8_t *bin)
-{
-    uint16_t spur_max = (uint16_t)VISION_BIN_OPEN_SPUR_MAX;
-    uint16_t y;
-
-    if (spur_max == 0) return;
-
-    for (y = 0; y < VISION_H; y++)
-    {
-        uint16_t row_off = (uint16_t)(y * VISION_W);
-        uint16_t x = 1;
-
-        while (x + 1 < VISION_W)
-        {
-            if (bin[row_off + x] != 0) { x++; continue; }
-
-            if (bin[row_off + (uint16_t)(x - 1)] == 255)
-            {
-                uint16_t s = x;
-                while (x < VISION_W && bin[row_off + x] == 0) x++;
-
-                if (x < VISION_W && bin[row_off + x] == 255)
-                {
-                    uint16_t e = (uint16_t)(x - 1);
-                    if ((uint16_t)(e - s + 1) <= spur_max)
-                    {
-                        uint16_t k;
-                        for (k = s; k <= e; k++) bin[row_off + k] = 255;
-                    }
-                }
-            }
-            else { x++; }
-        }
-    }
-}
-
-/* ============================================================
- * 边界提取 — 工具
- * ============================================================ */
-
-// 找一行中最长的连续 0（赛道像素）段
-static void find_widest_run_0(const uint8_t *row, uint16_t w, int16_t *out_l, int16_t *out_r)
-{
-    uint16_t x = 0;
-    uint16_t best_len = 0;
-    int16_t  best_l = -1, best_r = -1;
-
-    while (x < w)
-    {
-        if (row[x] == 0)
-        {
-            uint16_t l, r, len;
-            l = x;
-            while (x < w && row[x] == 0) x++;
-            r = (uint16_t)(x - 1);
-            len = (uint16_t)(r - l + 1);
-            if (len > best_len) { best_len = len; best_l = (int16_t)l; best_r = (int16_t)r; }
-        }
-        else { x++; }
-    }
-
-    if (best_len < VISION_MIN_RUN_LEN)
-        { *out_l = -1; *out_r = -1; }
-    else
-        { *out_l = best_l; *out_r = best_r; }
-}
-
-static uint8_t is_track_pixel(const uint8_t *bin, int16_t x, int16_t y)
-{
-    return (bin_at(bin, x, y) == 0);
-}
-
-// 赛道像素(0) 且八邻域存在背景(255)或越界 → 边界像素
-static uint8_t is_boundary_track_pixel(const uint8_t *bin, int16_t x, int16_t y)
-{
-    uint8_t k;
-
-    if (!is_track_pixel(bin, x, y)) return 0;
-    for (k = 0; k < 8; k++)
-    {
-        int16_t nx = (int16_t)(x + nb8[k][0]);
-        int16_t ny = (int16_t)(y + nb8[k][1]);
-        if (!in_bounds(nx, ny))    return 1;
-        if (bin_at(bin, nx, ny) != 0) return 1;
-    }
-    return 0;
-}
-
-// 在图像底部附近找边界像素作为轮廓跟踪种子点
-static uint8_t find_seed_boundary(const uint8_t *bin, int16_t *out_x, int16_t *out_y)
-{
-    int16_t y  = (int16_t)(VISION_H - 2);
-    int16_t cx = (int16_t)(VISION_W / 2);
-    int16_t dx;
-
-    if (y < 0) y = 0;
-
-    for (dx = 0; dx < (int16_t)VISION_W; dx++)
-    {
-        int16_t x1 = (int16_t)(cx - dx);
-        int16_t x2 = (int16_t)(cx + dx);
-
-        if (in_bounds(x1, y) && is_boundary_track_pixel(bin, x1, y))
-            { *out_x = x1; *out_y = y; return 1; }
-        if (in_bounds(x2, y) && is_boundary_track_pixel(bin, x2, y))
-            { *out_x = x2; *out_y = y; return 1; }
-    }
-    return 0;
-}
-
-// Moore 邻域轮廓追踪
-static uint16_t trace_contour_moore(const uint8_t *bin, int16_t sx, int16_t sy)
-{
-    int16_t cx = sx, cy = sy;
-    int16_t bx = (int16_t)(sx - 1), by = sy;
-    int16_t b0x = bx, b0y = by;
-    uint16_t count = 0;
-    uint16_t guard = (uint16_t)(VISION_CONTOUR_MAX_POINTS - 1);
-
-    if (!in_bounds(cx, cy) || !is_boundary_track_pixel(bin, cx, cy))
+        Image_Flag_Get_Start_Point = 0;
         return 0;
+    }
+}
 
-    while (guard--)
+/* ============================================================
+ * Search_L_R — 双边同步 Moore 邻域追踪 (8 邻域边界跟踪)
+ * 左边顺时针, 右边逆时针, 同步防止交叉
+ * ============================================================ */
+static void Search_L_R(uint16_t Break_Flag, uint8_t *image,
+                       uint16_t *L_Stastic, uint16_t *R_Stastic,
+                       uint8_t L_Start_X, uint8_t L_Start_Y,
+                       uint8_t R_Start_X, uint8_t R_Start_Y,
+                       uint8_t *pHightest)
+{
+    uint8_t i, j;
+    uint16_t L_Data_Statics, R_Data_Statics;
+    uint8_t Center_Point_L[2], Center_Point_R[2];
+    uint8_t Search_Filds_L[8][2];
+    uint8_t Search_Filds_R[8][2];
+    uint8_t Temp_L[8][2];
+    uint8_t Temp_R[8][2];
+    uint8_t Index_L, Index_R;
+
+    L_Data_Statics = *L_Stastic;
+    R_Data_Statics = *R_Stastic;
+
+    Center_Point_L[0] = L_Start_X;
+    Center_Point_L[1] = L_Start_Y;
+    Center_Point_R[0] = R_Start_X;
+    Center_Point_R[1] = R_Start_Y;
+
+    while (Break_Flag--)
     {
-        uint8_t start_idx, k;
-        uint8_t found, i;
-
-        if (count < VISION_CONTOUR_MAX_POINTS)
-        {
-            g_contour_points[count][0] = (uint16_t)cx;
-            g_contour_points[count][1] = (uint16_t)cy;
-            count++;
-        }
-
-        // 找 backtrack 点在邻域中的索引
-        start_idx = 0;
-        for (k = 0; k < 8; k++)
-        {
-            if ((int16_t)(cx + nb8[k][0]) == bx && (int16_t)(cy + nb8[k][1]) == by)
-                { start_idx = k; break; }
-        }
-
-        // 顺时针找下一个轮廓点
-        found = 0;
+        // === 左边 — 计算8邻域坐标 ===
         for (i = 0; i < 8; i++)
         {
-            uint8_t idx = (uint8_t)((start_idx + 1 + i) & 7);
-            int16_t nx = (int16_t)(cx + nb8[idx][0]);
-            int16_t ny = (int16_t)(cy + nb8[idx][1]);
-            if (is_track_pixel(bin, nx, ny))
+            Search_Filds_L[i][0] = (uint8_t)((int16_t)Center_Point_L[0] + Seeds_L[i][0]);
+            Search_Filds_L[i][1] = (uint8_t)((int16_t)Center_Point_L[1] + Seeds_L[i][1]);
+        }
+
+        // 记录左边当前点
+        Points_L[L_Data_Statics][0] = Center_Point_L[0];
+        Points_L[L_Data_Statics][1] = Center_Point_L[1];
+        L_Data_Statics++;
+
+        // === 右边 — 计算8邻域坐标 ===
+        for (i = 0; i < 8; i++)
+        {
+            Search_Filds_R[i][0] = (uint8_t)((int16_t)Center_Point_R[0] + Seeds_R[i][0]);
+            Search_Filds_R[i][1] = (uint8_t)((int16_t)Center_Point_R[1] + Seeds_R[i][1]);
+        }
+
+        // 记录右边当前点
+        Points_R[R_Data_Statics][0] = Center_Point_R[0];
+        Points_R[R_Data_Statics][1] = Center_Point_R[1];
+
+        // === 左边判断: 找黑→白过渡 (bg→track) ===
+        Index_L = 0;
+        for (i = 0; i < 8; i++)
+            { Temp_L[i][0] = 0; Temp_L[i][1] = 0; }
+
+        for (i = 0; i < 8; i++)
+        {
+            if (image[Search_Filds_L[i][1] * IMG_W + Search_Filds_L[i][0]] == 0
+                && image[Search_Filds_L[((i + 1) & 7)][1] * IMG_W
+                       + Search_Filds_L[((i + 1) & 7)][0]] == 255)
             {
-                uint8_t prev = (uint8_t)((idx + 7) & 7);
-                bx = (int16_t)(cx + nb8[prev][0]);
-                by = (int16_t)(cy + nb8[prev][1]);
-                cx = nx; cy = ny;
-                found = 1;
-                break;
+                Temp_L[Index_L][0] = Search_Filds_L[i][0];
+                Temp_L[Index_L][1] = Search_Filds_L[i][1];
+                Index_L++;
+                Dir_L[L_Data_Statics - 1] = i;
+            }
+
+            if (Index_L)
+            {
+                Center_Point_L[0] = Temp_L[0][0];
+                Center_Point_L[1] = Temp_L[0][1];
+                for (j = 0; j < Index_L; j++)
+                {
+                    if (Center_Point_L[1] > Temp_L[j][1])
+                    {
+                        Center_Point_L[0] = Temp_L[j][0];
+                        Center_Point_L[1] = Temp_L[j][1];
+                    }
+                }
             }
         }
-        if (!found) break;
 
-        if (cx == sx && cy == sy && bx == b0x && by == b0y) break;
+        // 停滞检测: 连续3次同一点 → 退出
+        if ((Points_R[R_Data_Statics][0] == Points_R[R_Data_Statics - 1][0]
+             && Points_R[R_Data_Statics][0] == Points_R[R_Data_Statics - 2][0]
+             && Points_R[R_Data_Statics][1] == Points_R[R_Data_Statics - 1][1]
+             && Points_R[R_Data_Statics][1] == Points_R[R_Data_Statics - 2][1])
+            || (Points_L[L_Data_Statics - 1][0] == Points_L[L_Data_Statics - 2][0]
+                && Points_L[L_Data_Statics - 1][0] == Points_L[L_Data_Statics - 3][0]
+                && Points_L[L_Data_Statics - 1][1] == Points_L[L_Data_Statics - 2][1]
+                && Points_L[L_Data_Statics - 1][1] == Points_L[L_Data_Statics - 3][1]))
+        {
+            break;
+        }
+
+        // 左右边界交叉检测
+        if (My_Abs((int)Points_R[R_Data_Statics][0]
+                 - (int)Points_L[L_Data_Statics - 1][0]) < 2
+            && My_Abs((int)Points_R[R_Data_Statics][1]
+                    - (int)Points_L[L_Data_Statics - 1][1]) < 2)
+        {
+            *pHightest = (uint8_t)(((uint16_t)Points_R[R_Data_Statics][1]
+                                  + (uint16_t)Points_L[L_Data_Statics - 1][1]) >> 1);
+            break;
+        }
+
+        // 同步: 左边比右边高 → 左边等待
+        if (Points_R[R_Data_Statics][1] < Points_L[L_Data_Statics - 1][1])
+            continue;
+
+        // 左边方向=7(正上方)且高于右边 → 左边等待
+        if (Dir_L[L_Data_Statics - 1] == 7
+            && Points_R[R_Data_Statics][1] > Points_L[L_Data_Statics - 1][1])
+        {
+            Center_Point_L[0] = (uint8_t)Points_L[L_Data_Statics - 1][0];
+            Center_Point_L[1] = (uint8_t)Points_L[L_Data_Statics - 1][1];
+            L_Data_Statics--;
+        }
+        R_Data_Statics++;
+
+        // === 右边判断: 找黑→白过渡 (bg→track) ===
+        Index_R = 0;
+        for (i = 0; i < 8; i++)
+            { Temp_R[i][0] = 0; Temp_R[i][1] = 0; }
+
+        for (i = 0; i < 8; i++)
+        {
+            if (image[Search_Filds_R[i][1] * IMG_W + Search_Filds_R[i][0]] == 0
+                && image[Search_Filds_R[((i + 1) & 7)][1] * IMG_W
+                       + Search_Filds_R[((i + 1) & 7)][0]] == 255)
+            {
+                Temp_R[Index_R][0] = Search_Filds_R[i][0];
+                Temp_R[Index_R][1] = Search_Filds_R[i][1];
+                Index_R++;
+                Dir_R[R_Data_Statics - 1] = i;
+            }
+
+            if (Index_R)
+            {
+                Center_Point_R[0] = Temp_R[0][0];
+                Center_Point_R[1] = Temp_R[0][1];
+                for (j = 0; j < Index_R; j++)
+                {
+                    if (Center_Point_R[1] > Temp_R[j][1])
+                    {
+                        Center_Point_R[0] = Temp_R[j][0];
+                        Center_Point_R[1] = Temp_R[j][1];
+                    }
+                }
+            }
+        }
     }
-    return count;
+
+    *L_Stastic = L_Data_Statics;
+    *R_Stastic = R_Data_Statics;
 }
 
 /* ============================================================
- * 边界提取 — 主流程
+ * Get_Left — 从点集提取左边界逐行数组
  * ============================================================ */
-
-// 八邻域轮廓跟踪 → 按行取 min/max 得左右边界
-static uint8_t extract_edges_8neighbor(const uint8_t *bin, vision_track_result_t *res)
+static void Get_Left(uint16_t Total_L)
 {
-    int16_t sx, sy;
-    uint16_t n, y, i;
+    uint8_t i;
+    uint16_t j;
+    int16_t h;
 
-    if (!find_seed_boundary(bin, &sx, &sy)) return 0;
+    for (i = 0; i < IMG_H; i++)
+        L_Border[i] = (uint8_t)BORDER_MIN;
 
-    n = trace_contour_moore(bin, sx, sy);
-    if (n < 40) return 0;
+    h = (int16_t)(IMG_H - 2);
 
-    for (y = 0; y < VISION_H; y++)
-        { res->left[y] = -1; res->right[y] = -1; res->mid[y] = -1; }
-
-    for (i = 0; i < n; i++)
+    for (j = 0; j < Total_L; j++)
     {
-        uint16_t yy = g_contour_points[i][1];
-        int16_t  x  = (int16_t)g_contour_points[i][0];
-        if (yy >= VISION_H) continue;
-
-        if (res->left[yy]  < 0 || x < res->left[yy])  res->left[yy]  = x;
-        if (res->right[yy] < 0 || x > res->right[yy]) res->right[yy] = x;
-    }
-
-    res->valid_rows = 0;
-    for (y = 0; y < VISION_H; y++)
-    {
-        if (res->left[y] >= 0 && res->right[y] >= 0)
+        if (Points_L[j][1] == (uint16_t)h)
         {
-            // 稀疏行跨度太小 → 全行扫描兜底
-            if (res->right[y] - res->left[y] + 1 < (int16_t)VISION_MIN_RUN_LEN)
-                find_widest_run_0(&bin[y * VISION_W], VISION_W, &res->left[y], &res->right[y]);
-
-            if (res->left[y] >= 0 && res->right[y] >= 0)
-            {
-                res->mid[y] = (int16_t)((res->left[y] + res->right[y]) / 2);
-                res->valid_rows++;
-            }
-        }
-    }
-    return (res->valid_rows > (uint8_t)(VISION_H / 3));
-}
-
-// 逐行搜索：从底部向上，用 last_mid 保持中线连续性
-static void extract_edges(const uint8_t *bin, vision_track_result_t *res)
-{
-    int16_t last_mid = (int16_t)(VISION_W / 2);
-    uint16_t y;
-
-    res->valid_rows = 0;
-    for (y = 0; y < VISION_H; y++)
-        { res->left[y] = -1; res->right[y] = -1; res->mid[y] = -1; }
-
-    for (y = (uint16_t)(VISION_H - 1);; y--)
-    {
-        const uint8_t *row = &bin[y * VISION_W];
-        int16_t l = -1, r = -1;
-
-        if (last_mid >= 0 && last_mid < (int16_t)VISION_W && row[last_mid] == 0)
-        {
-            int16_t tl = last_mid, tr = last_mid;
-            while (tl > 0 && row[tl] == 0) tl--;
-            if (row[tl] != 0) tl++;
-            while (tr < (int16_t)(VISION_W - 1) && row[tr] == 0) tr++;
-            if (row[tr] != 0) tr--;
-
-            if ((uint16_t)(tr - tl + 1) >= VISION_MIN_RUN_LEN)
-                { l = tl; r = tr; }
-        }
-
-        if (l < 0)
-            find_widest_run_0(row, VISION_W, &l, &r);
-
-        if (l >= 0)
-        {
-            int16_t m = (int16_t)((l + r) / 2);
-            res->left[y]  = l;
-            res->right[y] = r;
-            res->mid[y]   = m;
-            last_mid = m;
-            res->valid_rows++;
-        }
-        if (y == 0) break;
-    }
-}
-
-// 线性插值填补边界中的小间隙
-static void interpolate_edge_gaps(vision_track_result_t *res)
-{
-    uint16_t max_gap = (uint16_t)VISION_EDGE_INTERP_MAX_GAP_ROWS;
-    uint16_t y, y0, y1, g, k;
-    int16_t gap_i16;
-
-    if (max_gap == 0) return;
-
-    y = 0;
-    while (y < VISION_H)
-    {
-        if (res->mid[y] >= 0) { y++; continue; }
-        if (y == 0)            { y++; continue; }
-
-        y0 = (uint16_t)(y - 1);
-        if (res->mid[y0] < 0)  { y++; continue; }
-
-        y1 = y;
-        while (y1 < VISION_H && res->mid[y1] < 0) y1++;
-        if (y1 >= VISION_H || res->mid[y1] < 0) break;
-
-        g = (uint16_t)(y1 - y0 - 1);
-        if (g == 0 || g > max_gap) { y = y1; continue; }
-
-        if (res->left[y0] < 0 || res->left[y1] < 0 ||
-            res->right[y0] < 0 || res->right[y1] < 0)
-            { y = y1; continue; }
-
-        gap_i16 = (int16_t)(g + 1);
-        for (k = 1; k <= g; k++)
-        {
-            uint16_t yy = (uint16_t)(y0 + k);
-            int16_t ki16 = (int16_t)k;
-            int16_t l = (int16_t)(res->left[y0]  + ((res->left[y1]  - res->left[y0])  * ki16) / gap_i16);
-            int16_t r = (int16_t)(res->right[y0] + ((res->right[y1] - res->right[y0]) * ki16) / gap_i16);
-            if (l < 0) l = 0;
-            if (r > (int16_t)(VISION_W - 1)) r = (int16_t)(VISION_W - 1);
-            if (l > r) { int16_t t = l; l = r; r = t; }
-            res->left[yy]  = l;
-            res->right[yy] = r;
-            res->mid[yy]   = (int16_t)((l + r) / 2);
-            res->valid_rows++;
-        }
-        y = y1;
-    }
-}
-
-// 抗眩光行稳定：检测宽度/中线突变并回退
-static void stabilize_rows_against_glare(vision_track_result_t *res)
-{
-    int16_t last_l = -1, last_r = -1, last_m = -1;
-    uint16_t y;
-
-    for (y = (uint16_t)(VISION_H - 1);; y--)
-    {
-        int16_t l = res->left[y], r = res->right[y], m = res->mid[y];
-        if (!(l >= 0 && r >= l && m >= 0)) { if (y == 0) break; continue; }
-
-        if (last_m >= 0)
-        {
-            uint16_t w      = (uint16_t)(r - l + 1);
-            uint16_t last_w = (uint16_t)(last_r - last_l + 1);
-            uint16_t mid_jump = abs_i16_to_u16((int16_t)(m - last_m));
-            uint8_t touches_both = (uint8_t)(l <= VISION_EDGE_NEAR_TH &&
-                                             r >= (int16_t)(VISION_W - 1 - VISION_EDGE_NEAR_TH));
-            uint8_t width_grows_too_fast = 0;
-
-            if (w > (uint16_t)(last_w + (uint16_t)VISION_ROW_MAX_WIDTH_GROW))
-            {
-                if ((unsigned long)w * (unsigned long)VISION_ROW_MAX_WIDTH_RATIO_DEN >
-                    (unsigned long)last_w * (unsigned long)VISION_ROW_MAX_WIDTH_RATIO_NUM)
-                    width_grows_too_fast = 1;
-            }
-
-            if (!touches_both && mid_jump > (uint16_t)VISION_ROW_MAX_CENTER_JUMP && width_grows_too_fast)
-            {
-                res->left[y]  = last_l;
-                res->right[y] = last_r;
-                res->mid[y]   = last_m;
-            }
-            else { last_l = l; last_r = r; last_m = m; }
-        }
-        else { last_l = l; last_r = r; last_m = m; }
-
-        if (y == 0) break;
-    }
-}
-
-// 前向声明（定义在 classify_feature 之后）
-static uint8_t fit_line_x_of_y_q10(const int16_t *x_arr, uint16_t y_start,
-                                    uint16_t y_end, int16_t x_invalid,
-                                    long *k_q10, long *b_q10);
-static int16_t eval_line_q10(long k_q10, long b_q10, uint16_t y);
-
-// 单边补全：用已知车道宽度中位数，根据单边边界估算缺失边
-static void fill_missing_edges_by_width(vision_track_result_t *res)
-{
-    uint16_t y, i, j;
-    int16_t widths[VISION_H];
-    uint16_t valid_cnt = 0;
-    int16_t med_w;
-    int16_t margin;
-    int16_t boundary_r;
-
-    for (y = 0; y < VISION_H; y++)
-    {
-        if (res->left[y] >= 0 && res->right[y] >= 0)
-            widths[valid_cnt++] = (int16_t)(res->right[y] - res->left[y] + 1);
-    }
-
-    if (valid_cnt < 8) return;
-
-    for (i = 0; i < valid_cnt; i++)
-        for (j = (uint16_t)(i + 1); j < valid_cnt; j++)
-            if (widths[j] < widths[i])
-                { int16_t t = widths[i]; widths[i] = widths[j]; widths[j] = t; }
-
-    med_w = widths[valid_cnt / 2];
-    if (med_w < (int16_t)VISION_MIN_RUN_LEN) return;
-
-    // 补全所有行（不只底部 2/3）中缺少单边的情况
-    for (y = 0; y < VISION_H; y++)
-    {
-        if (res->left[y] >= 0 && res->right[y] >= 0) continue;
-
-        if (res->left[y] >= 0 && res->right[y] < 0)
-        {
-            int16_t r = (int16_t)(res->left[y] + med_w);
-            if (r < (int16_t)VISION_W)
-                { res->right[y] = r; res->mid[y] = (int16_t)((res->left[y] + r) / 2); res->valid_rows++; }
-        }
-        else if (res->right[y] >= 0 && res->left[y] < 0)
-        {
-            int16_t l = (int16_t)(res->right[y] - med_w);
-            if (l >= 0)
-                { res->left[y] = l; res->mid[y] = (int16_t)((l + res->right[y]) / 2); res->valid_rows++; }
-        }
-    }
-
-    // 顶部外推：顶部连续缺双边若干行时，从首个有效行区域的趋势向上外推
-    {
-        uint16_t first_valid;
-        uint16_t fit_end;
-        int16_t clean_top;
-        long kL_q10, bL_q10, kR_q10, bR_q10;
-
-        first_valid = VISION_H;
-        for (y = 0; y < VISION_H; y++)
-        {
-            if (res->left[y] >= 0 && res->right[y] >= 0)
-                { first_valid = y; break; }
-        }
-        if (first_valid == 0 || first_valid >= VISION_H)
-            return;
-
-        fit_end = first_valid + 25u;
-        if (fit_end >= VISION_H) fit_end = VISION_H - 1u;
-
-        margin     = (int16_t)VISION_EDGE_NEAR_TH;
-        boundary_r = (int16_t)(VISION_W - 1u - (uint16_t)margin);
-
-        // 找 fit 区域内第一条干净行
-        clean_top = -1;
-        {
-            uint16_t cy;
-            for (cy = first_valid; cy <= fit_end; cy++)
-            {
-                int16_t cl = res->left[cy];
-                int16_t cr = res->right[cy];
-                if (cl >= 0 && cr >= 0 && cl > margin && cr < boundary_r)
-                    { clean_top = (int16_t)cy; break; }
-            }
-        }
-        if (clean_top < 0) return;
-
-        if (!fit_line_x_of_y_q10(res->left,  (uint16_t)clean_top, fit_end, -1, &kL_q10, &bL_q10))
-            return;
-        if (!fit_line_x_of_y_q10(res->right, (uint16_t)clean_top, fit_end, -1, &kR_q10, &bR_q10))
-            return;
-
-        for (y = 0; y < first_valid; y++)
-        {
-            int16_t fl, fr;
-            if (res->left[y] >= 0 && res->right[y] >= 0) continue;
-            fl = eval_line_q10(kL_q10, bL_q10, y);
-            fr = eval_line_q10(kR_q10, bR_q10, y);
-            fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
-            fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
-            if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
-            if (fl < fr)
-            {
-                res->left[y]  = fl;
-                res->right[y] = fr;
-                res->mid[y]   = (int16_t)((fl + fr) / 2);
-                res->valid_rows++;
-            }
-        }
-    }
-}
-
-// 通用边界修复：找到单侧边碰图像边界的连续区域，从邻近干净行外推修正。
-// 适用于右转、环岛等非十字路口场景，避免图像边界被误认为赛道边缘。
-static void fix_boundary_zones(vision_track_result_t *res)
-{
-    uint16_t y;
-    int16_t margin;
-    int16_t boundary_r;
-
-    margin     = (int16_t)VISION_EDGE_NEAR_TH;
-    boundary_r = (int16_t)(VISION_W - 1u - (uint16_t)margin);
-
-    y = 0;
-    while (y < VISION_H)
-    {
-        uint16_t zone_start, zone_end;
-        uint16_t zone_len;
-        uint8_t locked_side; // 'L' 或 'R'
-        uint8_t touches_left, touches_right;
-        int16_t l, r;
-        int16_t ref_below_l, ref_below_r;
-        int16_t ref_above_l, ref_above_r;
-        int16_t ref_w;
-        uint16_t yy;
-
-        l = res->left[y];
-        r = res->right[y];
-        if (!(l >= 0 && r >= 0)) { y++; continue; }
-
-        touches_left  = (uint8_t)(l <= margin);
-        touches_right = (uint8_t)(r >= boundary_r);
-        if (!((touches_left && !touches_right) || (touches_right && !touches_left)))
-            { y++; continue; }
-
-        locked_side = touches_right ? 'R' : 'L';
-        zone_start  = y;
-
-        while (y < VISION_H)
-        {
-            int16_t l2 = res->left[y];
-            int16_t r2 = res->right[y];
-            if (!(l2 >= 0 && r2 >= 0)) break;
-            if (locked_side == 'R')
-            {
-                if (r2 < boundary_r) break;
-                if (l2 <= margin)    break;
-            }
-            else
-            {
-                if (l2 > margin)          break;
-                if (r2 >= boundary_r)     break;
-            }
-            y++;
-        }
-        zone_end = y;
-        zone_len = (uint16_t)(zone_end - zone_start);
-
-        if (zone_len < 3 || zone_start > (uint16_t)(VISION_H - 10))
-            continue;
-
-        // 找上下干净参考行
-        ref_above_l = -1; ref_above_r = -1;
-        for (yy = zone_end; yy < (uint16_t)(zone_end + 15) && yy < VISION_H; yy++)
-        {
-            int16_t la = res->left[yy];
-            int16_t ra = res->right[yy];
-            if (la >= 0 && ra >= 0 && la > margin && ra < boundary_r)
-                { ref_above_l = la; ref_above_r = ra; break; }
-        }
-
-        ref_below_l = -1; ref_below_r = -1;
-        {
-            int16_t ry;
-            for (ry = (int16_t)zone_start - 1; ry >= 0 && ry >= (int16_t)(zone_start - 15); ry--)
-            {
-                int16_t lb = res->left[(uint16_t)ry];
-                int16_t rb = res->right[(uint16_t)ry];
-                if (lb >= 0 && rb >= 0 && lb > margin && rb < boundary_r)
-                    { ref_below_l = lb; ref_below_r = rb; break; }
-            }
-        }
-
-        if (ref_below_l < 0 && ref_above_l < 0) continue;
-
-        // 线性插值（有上下参考）或外推（只有一侧参考）
-        if (ref_below_l >= 0 && ref_above_l >= 0)
-        {
-            uint16_t zi;
-            long t_q10;
-            long numer;
-            for (zi = 0; zi < zone_len; zi++)
-            {
-                yy = zone_start + zi;
-                t_q10 = ((long)(zi + 1) << 10) / (long)(zone_len + 1);
-                if (locked_side == 'R')
-                {
-                    int16_t new_r;
-                    numer = (long)(ref_above_r - ref_below_r) * t_q10;
-                    new_r = (int16_t)(ref_below_r + (numer >> 10));
-                    new_r = clamp_i16(new_r, 0, (int16_t)(VISION_W - 1));
-                    if (res->left[yy] < new_r)
-                    {
-                        res->right[yy] = new_r;
-                        res->mid[yy]   = (int16_t)((res->left[yy] + new_r) / 2);
-                    }
-                }
-                else
-                {
-                    int16_t new_l;
-                    numer = (long)(ref_above_l - ref_below_l) * t_q10;
-                    new_l = (int16_t)(ref_below_l + (numer >> 10));
-                    new_l = clamp_i16(new_l, 0, (int16_t)(VISION_W - 1));
-                    if (new_l < res->right[yy])
-                    {
-                        res->left[yy] = new_l;
-                        res->mid[yy]  = (int16_t)((new_l + res->right[yy]) / 2);
-                    }
-                }
-            }
-        }
-        else if (ref_below_l >= 0)
-        {
-            ref_w = (int16_t)(ref_below_r - ref_below_l + 1);
-            for (yy = zone_start; yy < zone_end; yy++)
-            {
-                if (locked_side == 'R')
-                {
-                    int16_t new_r = (int16_t)(res->left[yy] + ref_w);
-                    if (new_r < (int16_t)VISION_W)
-                        { res->right[yy] = new_r; res->mid[yy] = (int16_t)((res->left[yy] + new_r) / 2); }
-                }
-                else
-                {
-                    int16_t new_l = (int16_t)(res->right[yy] - ref_w);
-                    if (new_l >= 0)
-                        { res->left[yy] = new_l; res->mid[yy] = (int16_t)((new_l + res->right[yy]) / 2); }
-                }
-            }
+            L_Border[h] = (uint8_t)(Points_L[j][0] + 1);
         }
         else
         {
-            // 只有上方参考（区域在图像顶部）
-            ref_w = (int16_t)(ref_above_r - ref_above_l + 1);
-            for (yy = zone_start; yy < zone_end; yy++)
-            {
-                if (locked_side == 'R')
-                {
-                    int16_t new_r = (int16_t)(res->left[yy] + ref_w);
-                    if (new_r < (int16_t)VISION_W)
-                        { res->right[yy] = new_r; res->mid[yy] = (int16_t)((res->left[yy] + new_r) / 2); }
-                }
-                else
-                {
-                    int16_t new_l = (int16_t)(res->right[yy] - ref_w);
-                    if (new_l >= 0)
-                        { res->left[yy] = new_l; res->mid[yy] = (int16_t)((new_l + res->right[yy]) / 2); }
-                }
-            }
-        }
-    }
-}
-
-/* ============================================================
- * 特征分类
- * ============================================================ */
-
-static void classify_feature(const vision_track_result_t *res, vision_track_result_t *out)
-{
-    uint16_t y;
-    uint8_t cross_cnt = 0, ring_left_cnt = 0, ring_right_cnt = 0;
-    uint16_t y0 = (uint16_t)(VISION_H / 2);
-    static uint8_t cross_hold = 0;
-
-    for (y = y0; y < VISION_H; y++)
-    {
-        int16_t l, r;
-        uint16_t w;
-
-        l = res->left[y];
-        r = res->right[y];
-        if (l < 0 || r < 0) continue;
-
-        w = (uint16_t)(r - l + 1);
-
-        // CROSS uses wider margin (4px) because camera vignette creates fake
-        // track edges at x=183-187 that must be treated as boundary-touching
-        if (w > (uint16_t)VISION_CROSS_WIDE_TH_NUM &&
-            (l <= 4 ||
-             r >= (int16_t)(VISION_W - 1 - 4)))
-        {
-            cross_cnt++;
-        }
-        else if (w > (uint16_t)VISION_CROSS_END_TH_NUM)
-        {
-            cross_cnt++;
-        }
-
-        if (w > (uint16_t)(VISION_W * 6 / 10))
-        {
-            if (l <= 1) ring_left_cnt++;
-            if (r >= (int16_t)(VISION_W - 2)) ring_right_cnt++;
-        }
-    }
-
-    if (out->valid_rows < (uint8_t)(VISION_H / 4))
-        { out->feature = VISION_FEATURE_LOST; cross_hold = 0; return; }
-
-    if (cross_cnt >= 6)
-    {
-        cross_hold = 4;
-        out->feature = VISION_FEATURE_CROSS;
-        return;
-    }
-
-    if (cross_hold > 0)
-    {
-        cross_hold--;
-        out->feature = VISION_FEATURE_CROSS;
-        return;
-    }
-
-    if (ring_left_cnt >= 6 && ring_right_cnt < 3)
-        { out->feature = VISION_FEATURE_RING_LEFT; return; }
-    if (ring_right_cnt >= 6 && ring_left_cnt < 3)
-        { out->feature = VISION_FEATURE_RING_RIGHT; return; }
-
-    out->feature = VISION_FEATURE_NORMAL;
-}
-
-/* ============================================================
- * 十字补线
- * ============================================================ */
-
-// 最小二乘拟合：x = k*y + b，Q10 定点
-static uint8_t fit_line_x_of_y_q10(const int16_t *x_arr, uint16_t y_start, uint16_t y_end,
-                                    int16_t x_invalid, long *out_k_q10, long *out_b_q10)
-{
-    unsigned long n, sum_y, sum_y2;
-    long sum_x, sum_yx, denom, numer;
-    long mean_x_q10, mean_y_q10;
-    uint16_t y;
-
-    if (y_end <= y_start) return 0;
-
-    n = 0; sum_y = 0; sum_y2 = 0;
-    sum_x = 0; sum_yx = 0;
-
-    for (y = y_start; y <= y_end; y++)
-    {
-        int16_t x = x_arr[y];
-        if (x == x_invalid) continue;
-        n++;
-        sum_y  += (unsigned long)y;
-        sum_y2 += (unsigned long)y * (unsigned long)y;
-        sum_x  += (long)x;
-        sum_yx += (long)y * (long)x;
-    }
-
-    if (n < 6) return 0;
-
-    denom = (long)(n * sum_y2) - (long)sum_y * (long)sum_y;
-    numer = (long)(n * (unsigned long)sum_yx) - (long)sum_y * (long)sum_x;
-    if (denom == 0) return 0;
-
-    *out_k_q10 = (numer << 10) / denom;
-
-    mean_x_q10 = ((long)sum_x << 10) / (long)n;
-    mean_y_q10 = ((long)sum_y << 10) / (long)n;
-    *out_b_q10 = mean_x_q10 - (long)(((*out_k_q10) * mean_y_q10) >> 10);
-    return 1;
-}
-
-static int16_t eval_line_q10(long k_q10, long b_q10, uint16_t y)
-{
-    long x_q10 = k_q10 * (long)y + b_q10;
-    if (x_q10 >= 0) return (int16_t)((x_q10 + (1 << 9)) >> 10);
-    else            return (int16_t)((x_q10 - (1 << 9)) >> 10);
-}
-
-// 十字路口处理：在稳定锚点区域拟合赛道左右边缘的直线趋势，
-// 然后将碰图像边界的行和偏离趋势过远的行替换为趋势投影。
-// 这样边缘和中线会沿着赛道的自然趋势平滑穿过十字路口，
-// 而不会被十字臂误导到图像边界上。
-static void project_edges_through_cross(vision_track_result_t *res)
-{
-    uint16_t y;
-    uint16_t anchor_y0, anchor_y1;
-    int16_t margin;
-    int16_t boundary_r;
-    long kL_q10, bL_q10, kR_q10, bR_q10;
-
-    if (res->feature != VISION_FEATURE_CROSS)
-        return;
-
-    // Use wider margin (4px) than VISION_EDGE_NEAR_TH=2 to catch vignette
-    margin     = (int16_t)4;
-    boundary_r = (int16_t)(VISION_W - 1u - 4u);
-
-    // 1. 找锚点区域：取最大连续块，排除孤立行（如顶部十字臂残余）
-    {
-        uint16_t best_y0, best_y1, best_len;
-        uint16_t cur_y0, cur_len;
-        uint8_t in_block;
-
-        best_y0 = 0; best_y1 = 0; best_len = 0;
-        cur_y0 = 0; cur_len = 0;
-        in_block = 0;
-
-        for (y = 0; y < VISION_H; y++)
-        {
-            int16_t l = res->left[y];
-            int16_t r = res->right[y];
-            if (l >= 0 && r >= 0 && l > margin && r < boundary_r)
-            {
-                if (!in_block)
-                {
-                    in_block = 1;
-                    cur_y0 = y;
-                    cur_len = 1;
-                }
-                else
-                {
-                    cur_len++;
-                }
-            }
-            else
-            {
-                if (in_block)
-                {
-                    in_block = 0;
-                    if (cur_len > best_len)
-                    {
-                        best_len = cur_len;
-                        best_y0 = cur_y0;
-                        best_y1 = y - 1u;
-                    }
-                }
-            }
-        }
-        if (in_block && cur_len > best_len)
-        {
-            best_len = cur_len;
-            best_y0 = cur_y0;
-            best_y1 = VISION_H - 1u;
-        }
-
-        if (best_len < 20)
-            return;
-
-        anchor_y0 = best_y0;
-        anchor_y1 = best_y1;
-    }
-
-    // 2. 在锚点区域拟合左右边缘的直线趋势
-    if (!fit_line_x_of_y_q10(res->left,  anchor_y0, anchor_y1, -1, &kL_q10, &bL_q10))
-        return;
-    if (!fit_line_x_of_y_q10(res->right, anchor_y0, anchor_y1, -1, &kR_q10, &bR_q10))
-        return;
-
-    // 3. 逐行处理：碰边界的直接替换，偏离趋势远的也替换
-    for (y = 0; y < VISION_H; y++)
-    {
-        int16_t l = res->left[y];
-        int16_t r = res->right[y];
-        int16_t fl, fr, fm;
-        uint8_t touches_left, touches_right;
-
-        if (l < 0 || r < 0)
-        {
-            // 缺边：直接用投影
-            fl = eval_line_q10(kL_q10, bL_q10, y);
-            fr = eval_line_q10(kR_q10, bR_q10, y);
-            fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
-            fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
-            if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
-            res->left[y]  = fl;
-            res->right[y] = fr;
-            res->mid[y]   = (int16_t)((fl + fr) / 2);
             continue;
         }
-
-        touches_left  = (uint8_t)(l <= margin);
-        touches_right = (uint8_t)(r >= boundary_r);
-
-        if (!touches_left && !touches_right)
-        {
-            // 边不碰边界：检查中心是否偏离趋势太远
-            int16_t m;
-            int16_t dev;
-            uint8_t far_from_anchor;
-
-            m  = (int16_t)((l + r) / 2);
-            fl = eval_line_q10(kL_q10, bL_q10, y);
-            fr = eval_line_q10(kR_q10, bR_q10, y);
-            fm = (int16_t)((fl + fr) / 2);
-
-            far_from_anchor = (uint8_t)(y + 5u < anchor_y0 || y > anchor_y1 + 5u);
-            if (!far_from_anchor)
-                continue;
-
-            dev = (m > fm) ? (int16_t)(m - fm) : (int16_t)(fm - m);
-            if (dev <= 15)
-                continue;
-
-            fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
-            fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
-            if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
-            if (fl < fr)
-            {
-                res->left[y]  = fl;
-                res->right[y] = fr;
-                res->mid[y]   = (int16_t)((fl + fr) / 2);
-            }
-            continue;
-        }
-
-        // 碰边界：用趋势投影替换
-        fl = eval_line_q10(kL_q10, bL_q10, y);
-        fr = eval_line_q10(kR_q10, bR_q10, y);
-        fl = clamp_i16(fl, 0, (int16_t)(VISION_W - 1));
-        fr = clamp_i16(fr, 0, (int16_t)(VISION_W - 1));
-        if (fl > fr) { int16_t t = fl; fl = fr; fr = t; }
-        res->left[y]  = fl;
-        res->right[y] = fr;
-        res->mid[y]   = (int16_t)((fl + fr) / 2);
-    }
-}
-
-// 从两条连续边界曲线（左/右边线链）重建中线，而非简单 (left+right)/2。
-// 分别在左右边线上做 3 点中值平滑保持空间连续性，再从两条平滑曲线间取中点。
-// 转弯时个别行易出现噪点或边界触碰，逐行取中点易受误导；通过两条连续边线
-// 确定中线的思路更稳健。
-static void rebuild_mid_from_edge_chains(vision_track_result_t *res)
-{
-    uint16_t y;
-    int16_t smoothed_l[VISION_H];
-    int16_t smoothed_r[VISION_H];
-
-    if (res->valid_rows < 10) return;
-
-    for (y = 0; y < VISION_H; y++)
-        { smoothed_l[y] = res->left[y]; smoothed_r[y] = res->right[y]; }
-
-    for (y = 0; y < VISION_H; y++)
-    {
-        // 左边线链：局部 3 点中值
-        {
-            int16_t neighbors[3];
-            uint8_t cnt = 0;
-            int16_t dy;
-            for (dy = -1; dy <= 1; dy++)
-            {
-                int16_t yy = (int16_t)y + dy;
-                if (yy >= 0 && yy < (int16_t)VISION_H && res->left[(uint16_t)yy] >= 0)
-                    { neighbors[cnt] = res->left[(uint16_t)yy]; cnt++; }
-            }
-            if (cnt >= 2)
-            {
-                // 简单冒泡排序（最多 3 个元素）
-                if (cnt == 3 && neighbors[0] > neighbors[1])
-                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
-                if (cnt == 3 && neighbors[1] > neighbors[2])
-                    { int16_t t = neighbors[1]; neighbors[1] = neighbors[2]; neighbors[2] = t; }
-                if (cnt == 3 && neighbors[0] > neighbors[1])
-                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
-                smoothed_l[y] = neighbors[cnt / 2];
-            }
-        }
-
-        // 右边线链：局部 3 点中值
-        {
-            int16_t neighbors[3];
-            uint8_t cnt = 0;
-            int16_t dy;
-            for (dy = -1; dy <= 1; dy++)
-            {
-                int16_t yy = (int16_t)y + dy;
-                if (yy >= 0 && yy < (int16_t)VISION_H && res->right[(uint16_t)yy] >= 0)
-                    { neighbors[cnt] = res->right[(uint16_t)yy]; cnt++; }
-            }
-            if (cnt >= 2)
-            {
-                if (cnt == 3 && neighbors[0] > neighbors[1])
-                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
-                if (cnt == 3 && neighbors[1] > neighbors[2])
-                    { int16_t t = neighbors[1]; neighbors[1] = neighbors[2]; neighbors[2] = t; }
-                if (cnt == 3 && neighbors[0] > neighbors[1])
-                    { int16_t t = neighbors[0]; neighbors[0] = neighbors[1]; neighbors[1] = t; }
-                smoothed_r[y] = neighbors[cnt / 2];
-            }
-        }
-    }
-
-    // 从平滑后的左右边线链重建中线
-    for (y = 0; y < VISION_H; y++)
-    {
-        if (smoothed_l[y] >= 0 && smoothed_r[y] >= 0 && smoothed_l[y] < smoothed_r[y])
-            res->mid[y] = (int16_t)((smoothed_l[y] + smoothed_r[y]) / 2);
+        h--;
+        if (h == 0) break;
     }
 }
 
 /* ============================================================
- * 中心误差计算
+ * Get_Right — 从点集提取右边界逐行数组
  * ============================================================ */
-
-// 取前瞻行附近窗口中位中线
-static int16_t median_mid_near_y(const vision_track_result_t *res, uint16_t y_center)
+static void Get_Right(uint16_t Total_R)
 {
-    int16_t mids[(VISION_CENTER_WINDOW_RADIUS * 2u) + 1u];
-    uint16_t cnt = 0;
-    int16_t dy;
-    uint16_t i, j;
+    uint8_t i;
+    uint16_t j;
+    int16_t h;
 
-    for (dy = -(int16_t)VISION_CENTER_WINDOW_RADIUS; dy <= (int16_t)VISION_CENTER_WINDOW_RADIUS; dy++)
+    for (i = 0; i < IMG_H; i++)
+        R_Border[i] = (uint8_t)BORDER_MAX;
+
+    h = (int16_t)(IMG_H - 2);
+
+    for (j = 0; j < Total_R; j++)
     {
-        int16_t yy = (int16_t)y_center + dy;
-        if (yy < 0 || yy >= (int16_t)VISION_H) continue;
-        if (res->mid[(uint16_t)yy] >= 0)
-            mids[cnt++] = res->mid[(uint16_t)yy];
-    }
-
-    if (cnt == 0) return -1;
-
-    // 冒泡排序取中位
-    for (i = 0; i < cnt; i++)
-        for (j = (uint16_t)(i + 1); j < cnt; j++)
-            if (mids[j] < mids[i])
-                { int16_t t = mids[i]; mids[i] = mids[j]; mids[j] = t; }
-
-    return mids[cnt / 2];
-}
-
-static void compute_center_error(const vision_track_result_t *res, vision_track_result_t *out)
-{
-    int16_t cx = -1;
-    uint16_t y = (uint16_t)VISION_LOOKAHEAD_Y;
-    if (y >= VISION_H) y = (uint16_t)(VISION_H - 1);
-
-    if (res->mid[y] >= 0)
-    {
-        cx = median_mid_near_y(res, y);
-        if (cx < 0) cx = res->mid[y];
-    }
-    else
-    {
-        for (y = (uint16_t)(VISION_H - 1);; y--)
+        if (Points_R[j][1] == (uint16_t)h)
         {
-            if (res->mid[y] >= 0)
-            {
-                cx = median_mid_near_y(res, y);
-                if (cx < 0) cx = res->mid[y];
-                break;
-            }
-            if (y == 0) break;
-        }
-    }
-
-    out->center_x = cx;
-    if (cx >= 0)
-    {
-        // 帧间平滑
-        uint16_t num = (uint16_t)VISION_CENTER_SMOOTH_NUM;
-        uint16_t den = (uint16_t)VISION_CENTER_SMOOTH_DEN;
-        if (den == 0) den = 1;
-
-        if (g_last_center_x >= 0)
-        {
-            if (res->feature == VISION_FEATURE_CROSS)
-                cx = (int16_t)(((long)cx + (long)g_last_center_x) / 2);
-            else if (num <= den)
-            {
-                uint16_t old_num = (uint16_t)(den - num);
-                cx = (int16_t)(((long)num * (long)cx + (long)old_num * (long)g_last_center_x) / (long)den);
-            }
-        }
-
-        // 帧间跳变限幅
-        if (g_last_center_x >= 0)
-        {
-            int16_t delta = (int16_t)(cx - g_last_center_x);
-            int16_t max_jump = (int16_t)VISION_CENTER_FRAME_MAX_JUMP;
-            if (delta > max_jump)       cx = (int16_t)(g_last_center_x + max_jump);
-            else if (delta < -max_jump) cx = (int16_t)(g_last_center_x - max_jump);
-        }
-
-        g_last_center_x = cx;
-        g_center_hold_cnt = 0;
-        out->center_x = cx;
-        out->error_x  = (int16_t)(cx - (int16_t)(VISION_W / 2));
-    }
-    else
-    {
-        // 短暂保持上一帧中心
-        if (g_last_center_x >= 0 && g_center_hold_cnt < (uint8_t)VISION_CENTER_HOLD_FRAMES)
-        {
-            g_center_hold_cnt++;
-            out->center_x = g_last_center_x;
-            out->error_x  = (int16_t)(g_last_center_x - (int16_t)(VISION_W / 2));
+            R_Border[h] = (uint8_t)(Points_R[j][0] - 1);
         }
         else
         {
-            g_last_center_x = -1;
-            out->error_x = 0;
+            continue;
         }
+        h--;
+        if (h == 0) break;
     }
 }
 
 /* ============================================================
- * 主处理入口
+ * Lose_Line — 丢线判断 (检查左右边界是否同时碰到图像边缘)
  * ============================================================ */
-
-void vision_track_process(const uint8_t *gray, uint8_t *bin, vision_track_result_t *res)
+static uint8_t Lose_Line(void)
 {
-    // 1. 阈值
-#if (VISION_THRESHOLD_METHOD == VISION_THRESHOLD_OTSU)
-    uint8_t thr = compute_threshold_otsu(gray);
-#else
-    uint8_t thr = compute_threshold_isodata(gray);
-#endif
+    int i;
+    uint8_t Lose_Line_Point_L, Lose_Line_Point_R;
 
-    // 2. 极性
-#if (VISION_TRACK_POLARITY == VISION_TRACK_POLARITY_DARK)
-    uint8_t track_is_dark = 1;
-#elif (VISION_TRACK_POLARITY == VISION_TRACK_POLARITY_BRIGHT)
-    uint8_t track_is_dark = 0;
-#else
-    uint8_t track_is_dark = decide_track_is_dark(gray, thr);
-#endif
+    Lose_Line_Point_L = 0;
+    Lose_Line_Point_R = 0;
 
-    // 微偏置
-    thr = track_is_dark ? clamp_u8((long)thr + 5) : clamp_u8((long)thr - 7);
+    for (i = (int)(IMG_H / 2 + 20); i > (int)(IMG_H / 2 - 20); i -= 1)
+    {
+        if (L_Border[i] <= (uint8_t)LOSE_LINE_L_TH)
+            Lose_Line_Point_L++;
+        if (R_Border[i] >= (uint8_t)LOSE_LINE_R_TH)
+            Lose_Line_Point_R++;
+    }
+
+    if (Lose_Line_Point_L >= 10 && Lose_Line_Point_R >= 10)
+        return 1;
+    else if (Lose_Line_Point_L >= 10)
+        return 2;
+    else if (Lose_Line_Point_R >= 10)
+        return 3;
+    else
+        return 0;
+}
+
+/* ============================================================
+ * Straight_Line_Judge — 直线判断 (相邻行边界变化量累计, 判断赛道是否笔直)
+ * lineMode: 0=LeftLine, 1=RightLine
+ * ============================================================ */
+static uint8_t Straight_Line_Judge(uint8_t *Border, uint16_t Total_Num,
+                                   uint8_t lineMode)
+{
+    int i;
+    uint8_t StraightPoint;
+    int16_t diff;
+
+    if (Total_Num <= 1) return 1;
+
+    StraightPoint = 0;
+
+    for (i = (int)(IMG_H - 2); i > (int)Hightest; i -= 1)
+    {
+        if (lineMode == 1)  // RightLine
+        {
+            diff = (int16_t)Border[i] - (int16_t)Border[i - 1];
+            if (diff >= 0 && diff < 2
+                && Border[i] < (uint8_t)LOSE_LINE_R_TH
+                && Border[i - 1] < (uint8_t)LOSE_LINE_R_TH
+                && Border[i] > (uint8_t)(IMG_W / 2)
+                && Border[i - 1] > (uint8_t)(IMG_W / 2))
+            {
+                StraightPoint++;
+            }
+            else if (My_Abs(diff) > 5)
+            {
+                StraightPoint = 0;
+            }
+
+            if (StraightPoint >= STRAIGHT_LINE_CNT)
+                return 1;
+        }
+        else  // LeftLine
+        {
+            diff = (int16_t)Border[i] - (int16_t)Border[i - 1];
+            if (diff <= 0 && diff > -2
+                && Border[i] > 4
+                && Border[i - 1] > 4
+                && Border[i] < (uint8_t)(IMG_W / 2)
+                && Border[i - 1] < (uint8_t)(IMG_W / 2))
+            {
+                StraightPoint++;
+            }
+            else if (My_Abs(diff) > 5)
+            {
+                StraightPoint = 0;
+            }
+
+            if (StraightPoint >= STRAIGHT_LINE_CNT)
+                return 1;
+        }
+    }
+    return 0;
+}
+
+/* ============================================================
+ * Cross_Fill — 十字补线 (拐点检测 + 直线拟合填充缺失边界)
+ * ============================================================ */
+static void Cross_Fill(uint8_t *bin)
+{
+    uint16_t i;
+    uint16_t Break_Num_L_UP, Break_Num_R_UP;
+    uint16_t Break_Num_L_DOWN, Break_Num_R_DOWN;
+    uint16_t start, end;
+    float slope_l_rate, intercept_l;
+    int16_t val;
+
+    Break_Num_L_UP = 0;
+    Break_Num_R_UP = 0;
+    Break_Num_L_DOWN = 0;
+    Break_Num_R_DOWN = 0;
+    slope_l_rate = 0.0f;
+    intercept_l = 0.0f;
+
+    Image_Flag_Cross_Fill = 0;
+
+    // 只有四方都丢线时才检测十字
+    if (Lose_Line() != 1) return;
+
+    // 找左上拐点: 连续3点变化≤5, 断点变化≥7
+    for (i = 3; i < (uint16_t)CROSS_SEARCH_UP; i++)
+    {
+        if ((uint16_t)My_Abs((int)L_Border[i] - (int)L_Border[i - 1]) <= 5
+            && (uint16_t)My_Abs((int)L_Border[i - 1] - (int)L_Border[i - 2]) <= 5
+            && (uint16_t)My_Abs((int)L_Border[i - 2] - (int)L_Border[i - 3]) <= 5
+            && (int16_t)L_Border[i] - (int16_t)L_Border[i + 2] >= 7)
+        {
+            Break_Num_L_UP = i;
+            break;
+        }
+    }
+
+    // 找左下拐点
+    for (i = (uint16_t)(IMG_H - 5); i > (uint16_t)CROSS_SEARCH_DOWN; i--)
+    {
+        if ((uint16_t)My_Abs((int)L_Border[i] - (int)L_Border[i + 1]) <= 5
+            && (uint16_t)My_Abs((int)L_Border[i + 1] - (int)L_Border[i + 2]) <= 5
+            && (uint16_t)My_Abs((int)L_Border[i + 2] - (int)L_Border[i + 3]) <= 5
+            && (int16_t)L_Border[i] - (int16_t)L_Border[i - 2] >= 7)
+        {
+            Break_Num_L_DOWN = i;
+            break;
+        }
+    }
+
+    // 找右上拐点
+    for (i = 3; i < (uint16_t)CROSS_SEARCH_UP; i++)
+    {
+        if ((uint16_t)My_Abs((int)R_Border[i] - (int)R_Border[i - 1]) <= 5
+            && (uint16_t)My_Abs((int)R_Border[i - 1] - (int)R_Border[i - 2]) <= 5
+            && (uint16_t)My_Abs((int)R_Border[i - 2] - (int)R_Border[i - 3]) <= 5
+            && (int16_t)R_Border[i + 2] - (int16_t)R_Border[i] >= 7)
+        {
+            Break_Num_R_UP = i;
+            break;
+        }
+    }
+
+    // 找右下拐点
+    for (i = (uint16_t)(IMG_H - 5); i > (uint16_t)CROSS_SEARCH_DOWN; i--)
+    {
+        if ((uint16_t)My_Abs((int)R_Border[i] - (int)R_Border[i + 1]) <= 5
+            && (uint16_t)My_Abs((int)R_Border[i + 1] - (int)R_Border[i + 2]) <= 5
+            && (uint16_t)My_Abs((int)R_Border[i + 2] - (int)R_Border[i + 3]) <= 5
+            && (int16_t)R_Border[i - 2] - (int16_t)R_Border[i] >= 7)
+        {
+            Break_Num_R_DOWN = i;
+            break;
+        }
+    }
+
+    // 修正无效拐点对
+    if ((int16_t)Break_Num_R_DOWN - (int16_t)Break_Num_R_UP < 0
+        && Break_Num_R_DOWN && Break_Num_R_UP)
+        Break_Num_R_DOWN = 0;
+    if ((int16_t)Break_Num_L_DOWN - (int16_t)Break_Num_L_UP < 0
+        && Break_Num_L_DOWN && Break_Num_L_UP)
+        Break_Num_L_DOWN = 0;
+    if ((int16_t)Break_Num_R_UP - (int16_t)Break_Num_R_DOWN > 0
+        && Break_Num_R_DOWN && Break_Num_R_UP)
+        Break_Num_R_UP = 0;
+    if ((int16_t)Break_Num_L_UP - (int16_t)Break_Num_L_DOWN > 0
+        && Break_Num_L_DOWN && Break_Num_L_UP)
+        Break_Num_L_UP = 0;
+
+    // Case 1: 四拐点都找到 (1111)
+    if (Break_Num_L_DOWN && Break_Num_L_UP
+        && Break_Num_R_DOWN && Break_Num_R_UP)
+    {
+        Image_Flag_Cross_Fill = 1;
+
+        Get_K_b((uint8_t)L_Border[Break_Num_L_DOWN], (uint8_t)Break_Num_L_DOWN,
+                (uint8_t)L_Border[Break_Num_L_UP],   (uint8_t)Break_Num_L_UP,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_L_DOWN; i > Break_Num_L_UP; i--)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            L_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+
+        Get_K_b((uint8_t)R_Border[Break_Num_R_DOWN], (uint8_t)Break_Num_R_DOWN,
+                (uint8_t)R_Border[Break_Num_R_UP],   (uint8_t)Break_Num_R_UP,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_R_DOWN; i > Break_Num_R_UP; i--)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            R_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+    }
+    // Case 2: 左斜十字 — 左有两个拐点, 右只有上拐点 (1101)
+    else if (Break_Num_L_DOWN && Break_Num_L_UP
+             && !Break_Num_R_DOWN && Break_Num_R_UP)
+    {
+        Image_Flag_Cross_Fill = 1;
+
+        Get_K_b((uint8_t)L_Border[Break_Num_L_UP], (uint8_t)Break_Num_L_UP,
+                (uint8_t)L_Border[Break_Num_L_DOWN], (uint8_t)Break_Num_L_DOWN,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_L_DOWN; i > Break_Num_L_UP; i--)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            L_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+
+        start = Break_Num_R_UP - 15;
+        start = (uint16_t)Limit_a_b((int16_t)start, 5, (int)IMG_H - 5);
+        end = Break_Num_R_UP;
+        Get_K_b((uint8_t)R_Border[start], (uint8_t)start,
+                (uint8_t)R_Border[end],   (uint8_t)end,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_R_UP; i < (uint16_t)(IMG_H - 2); i++)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            R_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+    }
+    // Case 3: 右斜十字 — 右有两个拐点, 左只有上拐点 (0111)
+    else if (!Break_Num_L_DOWN && Break_Num_L_UP
+             && Break_Num_R_UP && Break_Num_R_DOWN)
+    {
+        Image_Flag_Cross_Fill = 1;
+
+        start = Break_Num_L_UP - 15;
+        start = (uint16_t)Limit_a_b((int16_t)start, 5, (int)IMG_H - 5);
+        end = Break_Num_L_UP;
+        Get_K_b((uint8_t)L_Border[start], (uint8_t)start,
+                (uint8_t)L_Border[end],   (uint8_t)end,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_L_UP; i < (uint16_t)(IMG_H - 2); i++)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            L_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+
+        Get_K_b((uint8_t)R_Border[Break_Num_R_UP], (uint8_t)Break_Num_R_UP,
+                (uint8_t)R_Border[Break_Num_R_DOWN], (uint8_t)Break_Num_R_DOWN,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_R_DOWN; i > Break_Num_R_UP; i--)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            R_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+    }
+    // Case 4: 只有上拐点, 且底部有赛道 (0101)
+    else if (Break_Num_L_UP && Break_Num_R_UP
+             && !Break_Num_L_DOWN && !Break_Num_R_DOWN
+             && bin[15 * IMG_W + (IMG_W - 10)]
+             && bin[(IMG_H - 10) * IMG_W + (IMG_W - 10)])
+    {
+        Image_Flag_Cross_Fill = 2;
+
+        start = Break_Num_L_UP - 15;
+        start = (uint16_t)Limit_a_b((int16_t)start, 5, (int)IMG_H - 5);
+        end = Break_Num_L_UP;
+        end = (uint16_t)Limit_a_b((int16_t)end, 5, (int)IMG_H - 5);
+        Get_K_b((uint8_t)L_Border[start], (uint8_t)start,
+                (uint8_t)L_Border[end],   (uint8_t)end,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_L_UP; i < (uint16_t)(IMG_H - 2); i++)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            L_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+
+        start = Break_Num_R_UP - 15;
+        start = (uint16_t)Limit_a_b((int16_t)start, 5, (int)IMG_H - 5);
+        end = Break_Num_R_UP;
+        end = (uint16_t)Limit_a_b((int16_t)end, 5, (int)IMG_H - 5);
+        Get_K_b((uint8_t)R_Border[start], (uint8_t)start,
+                (uint8_t)R_Border[end],   (uint8_t)end,
+                &slope_l_rate, &intercept_l);
+        for (i = Break_Num_R_UP; i < (uint16_t)(IMG_H - 2); i++)
+        {
+            val = (int16_t)(((float)i - intercept_l) / slope_l_rate);
+            R_Border[i] = (uint8_t)Limit_a_b(val, BORDER_MIN, (int)BORDER_MAX);
+        }
+    }
+    else
+    {
+        Image_Flag_Cross_Fill = 0;
+    }
+}
+
+/* ============================================================
+ * vision_track_process — 主处理入口 (二值化→滤波→追踪→补线→中线→偏差)
+ * ============================================================ */
+void vision_track_process(uint8_t *gray, uint8_t *bin,
+                          vision_track_result_t *res)
+{
+    uint8_t thr;
+    int16_t mid_val;
+    float err_f;
+
+    // 1. 二值化 (Turn_To_Bin: Otsu*1.075, bright→255=track)
+    Turn_To_Bin(gray, bin, &thr);
     res->threshold = thr;
-    res->track_is_dark = track_is_dark;
+    res->track_is_dark = 0;  // 亮色赛道
 
-    // 3. 二值化
-#if VISION_USE_SPLIT_THRESHOLD
-    binarize_to_track0_split(gray, bin, thr, track_is_dark);
-#else
-    binarize_to_track0(gray, bin, thr, track_is_dark);
-#endif
+    // 2. 形态学滤波 (Image_Filter: 8邻域和阈值)
+    Image_Filter(bin);
 
-    // 4. 形态学
-    bin_close_small_gaps_row(bin);
-    bin_open_small_spurs_row(bin);
-#if VISION_BIN_DESPECKLE
-    bin_despeckle_4n(bin);
-#endif
+    // 3. 画黑边框 (Image_Draw_Rectan)
+    Image_Draw_Rectan(bin);
 
-    // 5. 边界提取
-#if VISION_USE_8NEIGHBOR
-    if (!extract_edges_8neighbor(bin, res))
-        extract_edges(bin, res);
-#else
-    extract_edges(bin, res);
-#endif
-    interpolate_edge_gaps(res);
-    stabilize_rows_against_glare(res);
-    fill_missing_edges_by_width(res);
+    // 4. 初始化边界追踪状态
+    Data_Stastics_L = 0;
+    Data_Stastics_R = 0;
 
-    // 6. 特征分类
-    classify_feature(res, res);
+    // 5. 找种子点 + 双边追踪
+    if (Get_Start_Point(bin, (uint8_t)(IMG_H - 2)))
+    {
+        Search_L_R((uint16_t)USE_NUM, bin,
+                   &Data_Stastics_L, &Data_Stastics_R,
+                   Start_Point_L[0], Start_Point_L[1],
+                   Start_Point_R[0], Start_Point_R[1],
+                   &Hightest);
 
-    // 7. 按特征各自修复边界
-    if (res->feature == VISION_FEATURE_CROSS)
-        project_edges_through_cross(res);
+        // 6. 点集→逐行边界数组
+        Get_Left(Data_Stastics_L);
+        Get_Right(Data_Stastics_R);
+
+        // 7. 十字补线 (Cross_Fill)
+        Cross_Fill(bin);
+    }
     else
-        fix_boundary_zones(res);
+    {
+        // 没找到种子点 — 初始化边界为默认值
+        uint16_t ii;
+        for (ii = 0; ii < IMG_H; ii++)
+        {
+            L_Border[ii] = (uint8_t)BORDER_MIN;
+            R_Border[ii] = (uint8_t)BORDER_MAX;
+        }
+        Hightest = 0;
+    }
 
-    // 8. 从连续边线链重建中线（非逐行简单取中点）
-    rebuild_mid_from_edge_chains(res);
+    // 8. 中线 = (L+R)/2
+    {
+        int ii;
+        for (ii = (int)Hightest; ii < (int)(IMG_H - 1); ii++)
+        {
+            Center_Line_arr[ii] = (uint8_t)(
+                ((uint16_t)L_Border[ii] + (uint16_t)R_Border[ii]) >> 1);
+        }
+    }
 
-    // 9. 中心误差
-    compute_center_error(res, res);
+    // 9. Image_Erro = 加权平均 (原 row 69-71, 适配 103-106)
+    err_f = (float)Center_Line_arr[ERRO_ROW_LO] * 0.375f
+          + (float)Center_Line_arr[ERRO_ROW_MID] * 0.5f
+          + (float)Center_Line_arr[ERRO_ROW_HI] * 0.1f;
+
+    mid_val = (int16_t)err_f;
+    if (mid_val < 0)   mid_val = 0;
+    if (mid_val > (int16_t)(IMG_W - 1)) mid_val = (int16_t)(IMG_W - 1);
+
+    // 10. 翻转二值图回 YG 约定 (track=0, bg=255) — VOFA 显示兼容
+    {
+        uint16_t fi;
+        for (fi = 0; fi < IMG_SIZE; fi++)
+        {
+            bin[fi] = (bin[fi] == WHITE_PIXEL) ? 0 : 255;
+        }
+    }
+
+    // 11. 帧间平滑
+    if (g_last_center_x >= 0)
+    {
+        mid_val = (int16_t)(((int32_t)mid_val + (int32_t)g_last_center_x) / 2);
+    }
+    g_last_center_x = mid_val;
+    res->center_x = mid_val;
+    res->error_x  = (int16_t)(mid_val - (int16_t)(IMG_W / 2));
+
+    // 12. 填充输出结果 (逐行数组, 用于 trail.c 和 VOFA 显示)
+    {
+        uint16_t y;
+        int16_t l, r;
+
+        res->feature = VISION_FEATURE_NORMAL;
+        res->valid_rows = 0;
+
+        for (y = 0; y < IMG_H; y++)
+        {
+            l = (int16_t)L_Border[y];
+            r = (int16_t)R_Border[y];
+
+            // 边界合理性检查
+            if (l >= 0 && r >= (int16_t)l && l < (int16_t)IMG_W && r < (int16_t)IMG_W)
+            {
+                res->left[y]  = l;
+                res->right[y] = r;
+                res->mid[y]   = (int16_t)Center_Line_arr[y];
+                res->valid_rows++;
+            }
+            else
+            {
+                res->left[y]  = -1;
+                res->right[y] = -1;
+                res->mid[y]   = -1;
+            }
+        }
+
+        // 特征分类 (简化版: 只用 Cross_Fill 结果)
+        if (Image_Flag_Cross_Fill)
+            res->feature = VISION_FEATURE_CROSS;
+        else if (res->valid_rows < (uint8_t)(IMG_H / 4))
+            res->feature = VISION_FEATURE_LOST;
+        else
+            res->feature = VISION_FEATURE_NORMAL;
+    }
 }

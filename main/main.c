@@ -23,13 +23,13 @@ int main()
 void System_Init(void)
 {
     key_system_Init();
+    usb_cdc_init();
     vision_Init();
     icm_Init();
     motor_Init();
     encoder_Init();
     servo_Init();
     control_Init();
-    //wireless_vision_init();
 }
 
 void debug_main(void)

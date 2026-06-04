@@ -6,5 +6,8 @@
 void vision_isp_show_color(uint16_t x, uint16_t y, const vision_track_result_t *res);
 void vision_isp_overlay_lines(uint16_t x, uint16_t y, const vision_track_result_t *res);
 void vision_isp_debug_draw(uint8_t *bin, const vision_track_result_t *res);
+#if VISION_USE_WALLFOLLOW
+void vision_isp_overlay_wallfollow(uint16_t x, uint16_t y, const vision_track_result_t *res);
+#endif
 
 #endif
