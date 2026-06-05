@@ -6,6 +6,7 @@
 #include "servo.h"
 #include "motor.h"
 #include "vision.h"
+#include "track_fsm.h"
 
 float speed_base = 65;
 
@@ -49,10 +50,12 @@ static void control_timer_callback(void)
 #if FIXED_SPEED_DEBUG
     {
         float spd_factor;
+        float fsm_speed;
         float spd;
 
         spd_factor = trail_speed_factor();
-        spd = (float)FIXED_PWM_DUTY * spd_factor;
+        fsm_speed  = track_fsm_get_speed_factor(&g_track_fsm);
+        spd = (float)FIXED_PWM_DUTY * spd_factor * fsm_speed;
         speed_now_l = spd;
         speed_now_r = spd;
     }
@@ -106,9 +109,11 @@ void motor_speed_control(void)
 {
     float target_speed;
     float spd_factor;
+    float fsm_speed;
 
     spd_factor = trail_speed_factor();
-    target_speed = speed_base * spd_factor;
+    fsm_speed  = track_fsm_get_speed_factor(&g_track_fsm);
+    target_speed = speed_base * spd_factor * fsm_speed;
 
     // 增量PID内部已累加+限幅, 直接赋值
     speed_now_l = IncrementalPID_Calculate(&speed_pid_l, target_speed - (float)encoder_data_dir[0]);
@@ -173,75 +178,104 @@ void steering_control(void)
     // pp_steering_angle is in degrees, positive = right turn
     {
         float pp_err;
+        float ema_alpha;
+        float fsm_Kp;
+        float fsm_Kd;
+        static float steer_smooth = 0.0f;
 
-        pp_err = pp_steering_angle;
+        pp_err    = pp_steering_angle;
+        ema_alpha = track_fsm_get_ema_alpha(&g_track_fsm);
 
-        // Apply PD on the angle for smoothing
         if (track_element == BROKEN_RODE)
         {
+            fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
+            fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
+
 #if (CASCADE_PID == 1)
+            pid_gyro.Kp = fsm_Kp;
+            pid_gyro.Kd = fsm_Kd;
             steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
 #else
+            inertia_pid.Kp = fsm_Kp;
+            inertia_pid.Kd = fsm_Kd;
             steer_output = PositionalPID_Calculate(&inertia_pid, gyro_target - yaw);
 #endif
         }
         else
         {
-            // Simple P-gain on Pure Pursuit angle
-            // Kp=0.5 means a 20° error produces 10° wheel angle
             float pp_gain;
             pp_gain = 0.55f;
 
+            fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
+            fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
+
 #if (CASCADE_PID == 1)
+            pid_pos.Kp = fsm_Kp;
+            pid_pos.Kd = fsm_Kd;
             steer_output = PositionalPID_Calculate(&pid_pos, pp_err);
 #else
+            angle_pid.KP  = fsm_Kp;
+            angle_pid.KD  = fsm_Kd;
             steer_output = AnglePID_Calculate(&angle_pid, pp_err);
 #endif
-            // Blend: 70% Pure Pursuit direct, 30% PID
             steer_output = pp_err * pp_gain;
         }
 
         steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
 
-        {
-            static float steer_smooth = 0.0f;
-            steer_output = steer_smooth * 0.2f + steer_output * 0.8f;
-            steer_smooth = steer_output;
-        }
+        steer_output = steer_smooth * (1.0f - ema_alpha) + steer_output * ema_alpha;
+        steer_smooth = steer_output;
 
         servo_set_wheel_angle(steer_output);
         return;
     }
 #else
-    // Original: pixel-error based steering
+    // Original: pixel-error based steering with per-state PID
     {
         float track_error;
+        float ema_alpha;
+        float fsm_Kp;
+        float fsm_Kd;
+        static float steer_smooth = 0.0f;
+
         track_error = (float)CENTER_POINT - (float)track_midpoint_target;
+        ema_alpha  = track_fsm_get_ema_alpha(&g_track_fsm);
 
     if (track_element == BROKEN_RODE)
     {
+        fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
+        fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
+
 #if (CASCADE_PID == 1)
+        pid_gyro.Kp = fsm_Kp;
+        pid_gyro.Kd = fsm_Kd;
         steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
 #else
+        inertia_pid.Kp = fsm_Kp;
+        inertia_pid.Kd = fsm_Kd;
         steer_output = PositionalPID_Calculate(&inertia_pid, gyro_target - yaw);
 #endif
     }
     else
     {
+        fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
+        fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
+
 #if (CASCADE_PID == 1)
+        pid_pos.Kp = fsm_Kp;
+        pid_pos.Kd = fsm_Kd;
         steer_output = PositionalPID_Calculate(&pid_pos, track_error);
 #else
+        angle_pid.KP  = fsm_Kp;
+        angle_pid.KD  = fsm_Kd;
         steer_output = AnglePID_Calculate(&angle_pid, track_error);
 #endif
     }
 
     steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
 
-    {
-        static float steer_smooth = 0.0f;
-        steer_output = steer_smooth * 0.2f + steer_output * 0.8f;
-        steer_smooth = steer_output;
-    }
+    steer_output = steer_smooth * (1.0f - ema_alpha) + steer_output * ema_alpha;
+    steer_smooth = steer_output;
 
     servo_set_wheel_angle(steer_output);
     }

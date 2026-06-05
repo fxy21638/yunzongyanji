@@ -405,6 +405,16 @@
               <FilePath>.\code\trail.h</FilePath>
             </File>
             <File>
+              <FileName>track_fsm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\track_fsm.c</FilePath>
+            </File>
+            <File>
+              <FileName>track_fsm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\track_fsm.h</FilePath>
+            </File>
+            <File>
               <FileName>vision.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\code\vision.c</FilePath>

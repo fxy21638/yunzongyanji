@@ -14,6 +14,7 @@
 #include "control.h"
 #include "pid.h"
 #include "trail.h"
+#include "track_fsm.h"
 #include "speed_tune.h"
 
 #define LED GPIO_PB6

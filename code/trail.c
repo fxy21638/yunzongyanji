@@ -8,6 +8,7 @@
 
 #include "trail.h"
 #include "main.h"
+#include "track_fsm.h"
 
 #define TRACK_LOOKAHEAD_Y_NEAR (MT9V034_HEIGHT - 22)
 #define TRACK_LOOKAHEAD_Y_FAR  (MT9V034_HEIGHT / 2)
@@ -533,21 +534,59 @@ static void report_track_element_if_changed(void)
 }
 
 /* ================================================================
+ * FSM entry / exit callbacks
+ * ================================================================ */
+static void trail_fsm_on_entry(TRACK_ELEMENT state)
+{
+    if (state == BROKEN_RODE)
+    {
+        gyro_target = yaw;
+    }
+    if (state == CROSS)
+    {
+        g_track_fsm.state_hold = 3;
+    }
+    if (state == STRAIGHT || state == RIGHT_ANGLE_l || state == RIGHT_ANGLE_r ||
+        state == RING_l || state == RING_r || state == RING_c)
+    {
+        broken_flag_clear();
+    }
+}
+
+static void trail_fsm_on_exit(TRACK_ELEMENT state)
+{
+    (void)state;
+}
+
+/* ================================================================
  * Main track handler
  * ================================================================ */
 void track_handle(void)
 {
-    static uint8_t cross_exit_hold = 0;
+    static uint8_t fsm_inited = 0;
+    TRACK_ELEMENT raw_elem;
+    track_plan_t plan;
     int16_t break_row;
     uint8_t cross_cnt;
     float speed_est;
     int16_t jump;
-    uint16_t smooth;
+    uint8_t new_target;
+    float ema_alpha;
+
+    if (!fsm_inited)
+    {
+        track_fsm_init(&g_track_fsm);
+        track_fsm_set_callbacks(&g_track_fsm, trail_fsm_on_entry, trail_fsm_on_exit);
+        fsm_inited = 1;
+    }
 
     vision_poll_track();
     if (!g_track_valid)
     {
-        track_element = NONE;
+        g_track_fsm.state        = NONE;
+        g_track_fsm.pending      = NONE;
+        g_track_fsm.debounce_cnt = 0;
+        track_element   = NONE;
         current_element = NONE;
         return;
     }
@@ -555,74 +594,70 @@ void track_handle(void)
     track_element_P = track_element;
     track_midpoint_target_P = track_midpoint_target;
     current_element = track_element_judge();
+    raw_elem = current_element;
     cross_cnt = count_cross_rows(&g_track);
     break_row = detect_cross_break_row();
 
     // Compute Pure Pursuit and curvature (for speed decision)
-    speed_est = 45.0f; // estimated speed when FIXED_SPEED_DEBUG=1
+    speed_est = 45.0f;
     plan_pure_pursuit(speed_est);
     pp_curvature = compute_road_curvature(&g_track);
     pp_visible_high = g_track.visible_high;
 
-    // Element-specific target planning
-    if (current_element == CROSS)
-    {
-        broken_flag_clear();
-        if (g_track.center_x >= 0)
-            track_midpoint_target = clamp_center_to_target(g_track.center_x);
-        else
-            track_midpoint_target = CENTER_POINT;
-        track_element = CROSS;
-        cross_exit_hold = 3;
-    }
-    else if (track_element == CROSS && cross_exit_hold > 0)
-    {
-        cross_exit_hold--;
-        track_midpoint_target = CENTER_POINT;
-    }
-    else if (current_element == RIGHT_ANGLE_l || current_element == RIGHT_ANGLE_r)
-    {
-        broken_flag_clear();
-        track_midpoint_target = plan_turn_center(current_element);
-        track_element = current_element;
-    }
-    else if (current_element == RING_l || current_element == RING_r || current_element == RING_c)
-    {
-        broken_flag_clear();
-        track_midpoint_target = plan_straight_center();
-        track_element = current_element;
-    }
-    else if (current_element == BROKEN)
+    // Broken escalation: check if we've driven past the gap
+    if (raw_elem == BROKEN)
     {
         if (broken_judged())
-        {
-            track_element = BROKEN_RODE;
-            gyro_target = yaw;
-        }
+            raw_elem = BROKEN_RODE;
+    }
+
+    track_fsm_update(&g_track_fsm, raw_elem);
+    track_element = g_track_fsm.state;
+
+    // Target planning — delegated by FSM plan strategy
+    plan = track_fsm_get_plan(&g_track_fsm);
+    new_target = track_midpoint_target_P;
+
+    if (plan == PLAN_STRAIGHT)
+    {
+        new_target = plan_straight_center();
+    }
+    else if (plan == PLAN_TURN_LEFT)
+    {
+        new_target = plan_turn_center(RIGHT_ANGLE_l);
+    }
+    else if (plan == PLAN_TURN_RIGHT)
+    {
+        new_target = plan_turn_center(RIGHT_ANGLE_r);
+    }
+    else if (plan == PLAN_CROSS)
+    {
+        if (g_track.center_x >= 0)
+            new_target = clamp_center_to_target(g_track.center_x);
         else
+            new_target = CENTER_POINT;
+    }
+    /* PLAN_HOLD and PLAN_BROKEN: keep previous target */
+
+    // Post-processing: jump limiter + per-state EMA
+    if (track_element != BROKEN_RODE && track_element != NONE)
+    {
+        jump = (int16_t)new_target - (int16_t)track_midpoint_target_P;
+        if (jump > 12)
+            new_target = (uint8_t)((int16_t)track_midpoint_target_P + 12);
+        else if (jump < -12)
+            new_target = (uint8_t)((int16_t)track_midpoint_target_P - 12);
+
+        ema_alpha = track_fsm_get_ema_alpha(&g_track_fsm);
         {
-            track_element = BROKEN;
-            track_midpoint_target = track_midpoint_target_P;
+            float tf;
+            tf = (float)new_target * ema_alpha + (float)track_midpoint_target_P * (1.0f - ema_alpha);
+            track_midpoint_target = (uint8_t)(tf + 0.5f);
         }
     }
     else
     {
-        broken_flag_clear();
-        track_straight_target(0);
-        track_element = STRAIGHT;
-    }
-
-    // Post-processing: jump limiter + EMA smoothing
-    if (track_element != BROKEN_RODE && track_element != NONE)
-    {
-        jump = (int16_t)track_midpoint_target - (int16_t)track_midpoint_target_P;
-        if (jump > 12)
-            track_midpoint_target = (uint8_t)((int16_t)track_midpoint_target_P + 12);
-        else if (jump < -12)
-            track_midpoint_target = (uint8_t)((int16_t)track_midpoint_target_P - 12);
-
-        smooth = (uint16_t)track_midpoint_target + (uint16_t)track_midpoint_target_P * 3;
-        track_midpoint_target = (uint8_t)((smooth + 2) / 4);
+        track_midpoint_target = new_target;
     }
 
 #if TRAIL_DBG_PRINTF
