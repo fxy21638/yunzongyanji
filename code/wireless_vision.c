@@ -16,6 +16,8 @@ void wireless_vision_init(void)
 {
     ky_wireless_com_init(WIRELESS_VISION_BAUD);
 
+    printf("WIRELESS INIT OK (UART4, 115200)\r\n");
+
     // 启动后发一次测试字符串，验证 UART4+无线模块正常
     gpio_write_pin(WIRELESS_COM_RTS_PIN, GPIO_LOW);
     uart_send_string(WIRELESS_COM_UART, "WIRELESS OK\r\n");

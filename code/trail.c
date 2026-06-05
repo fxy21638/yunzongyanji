@@ -13,6 +13,8 @@
 #define TRACK_LOOKAHEAD_Y_FAR  (MT9V034_HEIGHT / 2)
 #define TRACK_EDGE_NEAR_TH     3
 #define TRACK_WIDE_TH          (MT9V034_WIDTH * 7 / 10)
+
+#define TRAIL_DBG_PRINTF 0
 #define TRACK_TURN_SHIFT       28
 #define TRACK_MIN_VALID_TURN_ROWS 8
 #define CROSS_MIN_STREAK       3
@@ -623,6 +625,7 @@ void track_handle(void)
         track_midpoint_target = (uint8_t)((smooth + 2) / 4);
     }
 
+#if TRAIL_DBG_PRINTF
     printf("DBG feature:%d cross_cnt:%u break_row:%d valid_rows:%u center_x:%d element:%s target:%u pp_ang:%.1f\r\n",
            g_track.feature,
            cross_cnt,
@@ -632,6 +635,7 @@ void track_handle(void)
            track_element_name(track_element),
            track_midpoint_target,
            pp_steering_angle);
+#endif
 
 #if VOFA_FIREWATER
     vofa_send_firewater();

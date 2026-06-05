@@ -7,13 +7,14 @@
 #include "motor.h"
 #include "vision.h"
 
-float speed_base = 45;
+float speed_base = 65;
 
-#define FIXED_SPEED_DEBUG 1
+// 速度模式: 1=开环固定PWM, 0=编码器闭环增量PID
+#define FIXED_SPEED_DEBUG 0
 #define FIXED_PWM_DUTY 600
 
-// Pure Pursuit steering: use pp_steering_angle directly
-#define VISION_USE_PURE_PURSUIT 1
+// 转向: 0=像素偏差PID, 1=Pure Pursuit (需BEV数据)
+#define VISION_USE_PURE_PURSUIT 0
 
 float gyro_target = 0;
 float gyro_control = 60;
@@ -93,48 +94,25 @@ void motor_clear(void)
     speed_r = 0;
     speed_now_l = 0;
     speed_now_r = 0;
+    speed_pid_l.output = 0;
+    speed_pid_l.error_prev = 0;
+    speed_pid_l.error_prev2 = 0;
+    speed_pid_r.output = 0;
+    speed_pid_r.error_prev = 0;
+    speed_pid_r.error_prev2 = 0;
 }
 
 void motor_speed_control(void)
 {
-    float speed_gain_l;
-    float speed_gain_r;
     float target_speed;
     float spd_factor;
 
     spd_factor = trail_speed_factor();
     target_speed = speed_base * spd_factor;
 
-    speed_gain_l = IncrementalPID_Calculate(&speed_pid_l, target_speed - encoder_data_dir[0]);
-    speed_l += speed_gain_l;
-    speed_gain_r = IncrementalPID_Calculate(&speed_pid_r, target_speed - encoder_data_dir[1]);
-    speed_r += speed_gain_r;
-
-    // Anti-windup
-    if (speed_l > MOTOR_SPEED_LIMIT)
-    {
-        speed_l = MOTOR_SPEED_LIMIT;
-        if (speed_gain_l > 0) speed_l -= speed_gain_l;
-    }
-    else if (speed_l < -MOTOR_SPEED_LIMIT)
-    {
-        speed_l = -MOTOR_SPEED_LIMIT;
-        if (speed_gain_l < 0) speed_l -= speed_gain_l;
-    }
-
-    if (speed_r > MOTOR_SPEED_LIMIT)
-    {
-        speed_r = MOTOR_SPEED_LIMIT;
-        if (speed_gain_r > 0) speed_r -= speed_gain_r;
-    }
-    else if (speed_r < -MOTOR_SPEED_LIMIT)
-    {
-        speed_r = -MOTOR_SPEED_LIMIT;
-        if (speed_gain_r < 0) speed_r -= speed_gain_r;
-    }
-
-    speed_now_l = speed_l;
-    speed_now_r = speed_r;
+    // 增量PID内部已累加+限幅, 直接赋值
+    speed_now_l = IncrementalPID_Calculate(&speed_pid_l, target_speed - (float)encoder_data_dir[0]);
+    speed_now_r = IncrementalPID_Calculate(&speed_pid_r, target_speed - (float)encoder_data_dir[1]);
 }
 
 void steering_control(void)
@@ -144,48 +122,50 @@ void steering_control(void)
     int16_t last_l, last_r;
     uint8_t emergency;
 
-    // ====== Emergency recovery ======
-    emergency = 0;
-    steer_output = 0.0f;
-    last_l = -1;
-    last_r = -1;
+#if 0
+	    // ====== Emergency recovery (disabled for tuning) ======
+	    emergency = 0;
+	    steer_output = 0.0f;
+	    last_l = -1;
+	    last_r = -1;
 
-    if (!g_track_valid ||
-        g_track.feature == VISION_FEATURE_LOST ||
-        g_track.valid_rows < 5)
-    {
-        for (y = (uint16_t)(MT9V034_HEIGHT / 2); y < MT9V034_HEIGHT; y++)
-        {
-            if (g_track.left[y] >= 0)  last_l = g_track.left[y];
-            if (g_track.right[y] >= 0) last_r = g_track.right[y];
-        }
+	    if (!g_track_valid ||
+	        g_track.feature == VISION_FEATURE_LOST ||
+	        g_track.valid_rows < 5)
+	    {
+	        for (y = (uint16_t)(MT9V034_HEIGHT / 2); y < MT9V034_HEIGHT; y++)
+	        {
+	            if (g_track.left[y] >= 0)  last_l = g_track.left[y];
+	            if (g_track.right[y] >= 0) last_r = g_track.right[y];
+	        }
 
-        if (last_l >= 0 && last_r < 0)
-        {
-            emergency = 1;
-            steer_output = STEER_OUTPUT_LIMIT;
-        }
-        else if (last_r >= 0 && last_l < 0)
-        {
-            emergency = 2;
-            steer_output = -STEER_OUTPUT_LIMIT;
-        }
-        else if (last_l < 0 && last_r < 0)
-        {
-            static int8_t last_emergency_dir = 0;
-            if (last_emergency_dir == 0) last_emergency_dir = 1;
-            emergency = 3;
-            steer_output = (float)last_emergency_dir * STEER_OUTPUT_LIMIT * 0.5f;
-        }
-    }
+	        if (last_l >= 0 && last_r < 0)
+	        {
+	            emergency = 1;
+	            steer_output = STEER_OUTPUT_LIMIT;
+	        }
+	        else if (last_r >= 0 && last_l < 0)
+	        {
+	            emergency = 2;
+	            steer_output = -STEER_OUTPUT_LIMIT;
+	        }
+	        else if (last_l < 0 && last_r < 0)
+	        {
+	            static int8_t last_emergency_dir = 0;
+	            if (last_emergency_dir == 0) last_emergency_dir = 1;
+	            emergency = 3;
+	            steer_output = (float)last_emergency_dir * STEER_OUTPUT_LIMIT * 0.5f;
+	        }
+	    }
 
-    if (emergency)
-    {
-        speed_now_l = FIXED_PWM_DUTY / 3;
-        speed_now_r = FIXED_PWM_DUTY / 3;
-        servo_set_wheel_angle(steer_output);
-        return;
-    }
+	    if (emergency)
+	    {
+	        speed_now_l = FIXED_PWM_DUTY / 3;
+	        speed_now_r = FIXED_PWM_DUTY / 3;
+	        servo_set_wheel_angle(steer_output);
+	        return;
+	    }
+#endif
 
     // ====== Normal steering ======
 #if VISION_USE_PURE_PURSUIT

@@ -9,8 +9,12 @@ typedef struct
 {
     float Kp;
     float Ki;
+    float Kd;
+    float out_min;
+    float out_max;
     float error_prev;
     float error_prev2;
+    float output;
 } IncrementalPID;
 
 typedef struct

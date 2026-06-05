@@ -1083,5 +1083,19 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
             res->feature = VISION_FEATURE_LOST;
         else
             res->feature = VISION_FEATURE_NORMAL;
+
+        // 补充 trail.c 需要的字段
+        res->visible_high = Hightest;
+        {
+            uint16_t bw;
+            int16_t l_bot, r_bot;
+            l_bot = (int16_t)L_Border[(uint16_t)(IMG_H - 5)];
+            r_bot = (int16_t)R_Border[(uint16_t)(IMG_H - 5)];
+            bw = (uint16_t)(r_bot - l_bot);
+            if (bw > 0 && bw < (uint16_t)IMG_W)
+                res->lane_width = (int16_t)bw;
+            else
+                res->lane_width = (int16_t)(IMG_W / 2);  // 默认半幅宽
+        }
     }
 }

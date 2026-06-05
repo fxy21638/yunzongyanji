@@ -16,6 +16,7 @@ image_t image_data[MT9V034_HEIGHT * MT9V034_WIDTH];
 
 vision_track_result_t g_track;
 uint8_t g_track_valid = 0;
+uint8_t g_vofa_pending = 0;  // 新帧就绪待 VOFA 发送, 与 g_track_valid 解耦
 
 void vision_Init(void)
 {
@@ -65,6 +66,7 @@ void vision_poll_track(void)
     {
         vision_track_process((uint8_t *)mt9v034_image, (uint8_t *)image_data, &g_track);
         g_track_valid = 1;
+        g_vofa_pending = 1;
         mt9v034_frame_ready = 0;
     }
 }

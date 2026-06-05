@@ -3,8 +3,14 @@
 #include "vision_track.h"
 #include "wireless_vision.h"
 
+// 图像发送总开关: 0=跑车模式(不发图), 1=调试模式(发图)
+#define VOFA_IMAGE_ENABLE 0
 // 无线图像输出: 0=仅USB, 1=USB+无线
 #define WIRELESS_IMAGE_OUTPUT 0
+// 图像发送跳帧: 每 N 帧发一次图
+#define VOFA_IMAGE_SKIP 3
+// 精简图像模式: 0=3张全发, 1=仅发叠加中线图
+#define VOFA_IMAGE_LEAN 1
 
 #define DISPLAY_MAX_CHAIN_POINTS MT9V034_HEIGHT
 #define DISPLAY_CENTER_POINTS 128
@@ -33,6 +39,7 @@ typedef struct
 
 extern vision_track_result_t g_track;
 extern uint8_t g_track_valid;
+extern uint8_t g_vofa_pending;
 extern image_t image_data[MT9V034_HEIGHT * MT9V034_WIDTH];
 
 static display_point_t g_left_chain[DISPLAY_MAX_CHAIN_POINTS];
@@ -818,21 +825,37 @@ static void render_pseudo_gray(uint8_t *out, const uint8_t *bin, const vision_tr
 
 void vofa_image_task(void)
 {
-	if (!g_track_valid)
+	static uint8_t skip_cnt = 0;
+
+#if (VOFA_IMAGE_ENABLE == 0)
+	g_vofa_pending = 0;
+	return;
+#endif
+
+	if (!g_vofa_pending)
 		return;
 
+	if (++skip_cnt < VOFA_IMAGE_SKIP)
+	{
+		g_vofa_pending = 0;
+		return;
+	}
+	skip_cnt = 0;
+
+#if (VOFA_IMAGE_LEAN == 0)
 	// 1. 原始灰度图
 	vofa_sendGrayscaleImageEx((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
 #if (WIRELESS_IMAGE_OUTPUT == 1)
 	wireless_vision_send_image((uint8_t *)mt9v034_image, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_GRAY);
 #endif
 
-	// 2. 二值化伪彩图（image_data 已由 vision_poll_track 写入，原地转换）
+	// 2. 二值化伪彩图
 	render_pseudo_gray((uint8_t *)image_data, (const uint8_t *)image_data, &g_track);
 	vofa_sendGrayscaleImageEx((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
 #if (WIRELESS_IMAGE_OUTPUT == 1)
 	wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_PSEUDO);
 #endif
+#endif // VOFA_IMAGE_LEAN
 
 	// 3. 灰度叠加中线图（覆盖 image_data，源图为原始灰度）
 	render_overlay_mid((uint8_t *)image_data, (const uint8_t *)mt9v034_image, &g_track);
@@ -841,5 +864,5 @@ void vofa_image_task(void)
 	wireless_vision_send_image((uint8_t *)image_data, MT9V034_WIDTH, MT9V034_HEIGHT, VOFA_IMAGE_ID_OVERLAY);
 #endif
 
-	g_track_valid = 0;
+	g_vofa_pending = 0;
 }
