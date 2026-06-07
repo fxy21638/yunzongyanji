@@ -406,136 +406,47 @@ static uint8_t detect_cross_scene(void)
 }
 
 /* ================================================================
- * Ring / 圆环 detection (from opencvTest.cpp reference)
+ * Ring / 环岛检测
  *
- * Principle: when a ring branches off one side, that side's boundary
- * ends earlier while the opposite boundary continues.  The entry is
- * found by scanning horizontally from the longer-edge side toward the
- * shorter-edge side, looking for the ring's inner boundary.
- *
- * TODO: needs binary image access for horizontal scan (ring corner
- *       detection).  Currently works with boundary arrays only —
- *       will miss the inner ring boundary if it's >2px inside the
- *       tracked edge.
- * TODO: integrate into track_element_judge() and FSM once corner
- *       detection is validated on real track images.
+ * 环岛 vs 转弯: 转弯前面没路了, 环岛岛后面还有路。
+ * 在岛上方多行扫描, 路中线连续居中 → 路直着往前延伸 → 环岛。
+ * 多点扫描抗单帧噪点, 保证逐帧检测结果稳定, FSM 滞回才能生效。
  * ================================================================ */
-#define RING_LEN_DIFF_TH  40   /* TODO: 环岛最小边数差 (像素) */
-#define RING_GAP_STREAK    5   /* TODO: 环岛缺口连续行数 */
-#define RING_EDGE_SHIFT   25   /* TODO: 环岛入口边界偏移阈值 */
+#define RING_SCAN_Y_START  (MT9V034_HEIGHT / 2)      /* 扫描起始行 (60) */
+#define RING_SCAN_Y_END    (MT9V034_HEIGHT / 5)      /* 扫描结束行 (24) */
+#define RING_SCAN_MIN_CNT  3                          /* 最少居中行数 */
 
-static TRACK_ELEMENT detect_ring(void)
+static TRACK_ELEMENT detect_ring(TRACK_ELEMENT seg_elem)
 {
     uint16_t y;
-    uint16_t left_cnt, right_cnt;
-    uint16_t left_end_y, right_end_y;
-    int16_t last_l, last_r;
-    uint8_t ring_entry_found;
-    uint16_t ring_entry_y;
-    int16_t ring_edge_x;
+    uint8_t cnt;
+    int16_t r, l, center;
 
-    left_cnt = 0;
-    right_cnt = 0;
-    left_end_y = 0;
-    right_end_y = 0;
-    last_l = -1;
-    last_r = -1;
-    ring_entry_found = 0;
-    ring_entry_y = 0;
-    ring_edge_x = 0;
+    cnt = 0;
 
-    /* 从底向上统计每边有效行数 */
-    for (y = (uint16_t)(MT9V034_HEIGHT / 3); y < MT9V034_HEIGHT; y++)
+    for (y = (uint16_t)RING_SCAN_Y_START; y > (uint16_t)RING_SCAN_Y_END; y--)
     {
-        if (g_track.left[y] > 2)
+        l = g_track.left[y];
+        r = g_track.right[y];
+
+        if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4))
         {
-            left_cnt++;
-            left_end_y = y;
-            last_l = g_track.left[y];
-        }
-        if (g_track.right[y] < (int16_t)(MT9V034_WIDTH - 4))
-        {
-            right_cnt++;
-            right_end_y = y;
-            last_r = g_track.right[y];
-        }
-    }
-
-    /* 边数差不够 → 非环岛 */
-    if (left_cnt >= right_cnt)
-    {
-        if (left_cnt - right_cnt < (uint16_t)RING_LEN_DIFF_TH)
-            return NONE;
-    }
-    else
-    {
-        if (right_cnt - left_cnt < (uint16_t)RING_LEN_DIFF_TH)
-            return NONE;
-    }
-
-    /* ---- 环岛候选 ---- */
-
-    if (left_cnt < right_cnt)
-    {
-        /* RING_l: 左边界短, 环岛向左分叉.
-           右边界在左边界结束后继续延伸.
-           在 left_end_y 上方扫描右边界内移
-           (环岛内边界表现为向左跳跃). */
-        ring_entry_found = 0;
-        last_r = g_track.right[left_end_y];
-
-        for (y = left_end_y; y > (uint16_t)(MT9V034_HEIGHT / 3); y--)
-        {
-            if (g_track.right[y] < (int16_t)(MT9V034_WIDTH - 4))
+            center = (l + r) / 2;
+            if (center > (int16_t)(CENTER_POINT - 20) && center < (int16_t)(CENTER_POINT + 20))
             {
-                /* 右边界显著内移 → 环岛拐角 */
-                if (last_r > 0 && g_track.right[y] - last_r > (int16_t)RING_EDGE_SHIFT)
+                cnt++;
+                if (cnt >= RING_SCAN_MIN_CNT)
                 {
-                    ring_entry_found = 1;
-                    ring_entry_y = y;
-                    ring_edge_x = g_track.right[y];
-                    break;
+                    if (seg_elem == RIGHT_ANGLE_l)
+                        return RING_l;
+                    if (seg_elem == RIGHT_ANGLE_r)
+                        return RING_r;
                 }
-                last_r = g_track.right[y];
             }
         }
-
-        if (ring_entry_found)
-        {
-            /* TODO: 从 (ring_edge_x, ring_entry_y) 向左扫描二值图,
-               寻找环岛内边界的左边缘.
-               当前基于边数差+右边界内移返回 RING_l. */
-            return RING_l;
-        }
-        /* 边数差满足但无内移 → 可能误触发, 仍返回 RING_l 让调用方决策. */
-        return RING_l;
     }
-    else
-    {
-        /* RING_r: 右边界短, 环岛向右分叉. 与 RING_l 镜像. */
-        ring_entry_found = 0;
-        last_l = g_track.left[right_end_y];
 
-        for (y = right_end_y; y > (uint16_t)(MT9V034_HEIGHT / 3); y--)
-        {
-            if (g_track.left[y] > 2)
-            {
-                /* 左边界显著内移 → 环岛拐角 */
-                if (last_l > 0 && last_l - g_track.left[y] > (int16_t)RING_EDGE_SHIFT)
-                {
-                    ring_entry_found = 1;
-                    ring_entry_y = y;
-                    ring_edge_x = g_track.left[y];
-                    break;
-                }
-                last_l = g_track.left[y];
-            }
-        }
-
-        if (ring_entry_found)
-            return RING_r;
-        return RING_r;
-    }
+    return NONE;
 }
 /* ================================================================
  * Qr-inspired segment-based element detection
@@ -578,22 +489,15 @@ static TRACK_ELEMENT detect_element_segment(void)
     w_near = r_near - l_near + 1;
     w_far = r_far - l_far + 1;
 
-    /* 宽赛道: 先看中线偏移区分弯道/十字 (弯道优先, 防止宽右弯误判十字) */
-    if (near_left_ok && near_right_ok && far_left_ok && far_right_ok
-        && w_near > (int16_t)(MT9V034_WIDTH * 3 / 4)
-        && w_far > (int16_t)(MT9V034_WIDTH * 3 / 4))
+    /* 十字: 左右边界同时向外跳变 (左边界变小=向左扩张, 右边界变大=向右扩张)
+       转弯只有一侧边界外扩, 十字两侧同时外扩, 阈值8px过滤窄道抖动 */
+    if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
     {
-        c_near = (l_near + r_near) / 2;
-        c_far = (l_far + r_far) / 2;
-        dx = c_far - c_near;
+        int16_t l_jump, r_jump;
+        l_jump = l_near - l_far;
+        r_jump = r_far - r_near;
 
-        if (dx > 5)
-            return RIGHT_ANGLE_r;
-        if (dx < -5)
-            return RIGHT_ANGLE_l;
-
-        if (c_near > (int16_t)(CENTER_POINT - 20) && c_near < (int16_t)(CENTER_POINT + 20)
-            && c_far  > (int16_t)(CENTER_POINT - 18) && c_far  < (int16_t)(CENTER_POINT + 18))
+        if (l_jump > 8 && r_jump > 8)
             return CROSS;
     }
 
@@ -658,18 +562,23 @@ TRACK_ELEMENT track_element_judge(void)
     if (!g_track_valid)
         return NONE;
 
-    /* 视觉层特征标志 (来自 Cross_Fill / 环岛检测) */
+    /* 视觉层特征标志 */
     if (g_track.feature == VISION_FEATURE_LOST)
         return BROKEN;
-    if (g_track.feature == VISION_FEATURE_RING_LEFT)
-        return RING_l;
-    if (g_track.feature == VISION_FEATURE_RING_RIGHT)
-        return RING_r;
-    /* TODO: 接入detect_ring() — 目前vision层不设置RING feature,
-       需要确认二值化图像可访问后, 在detect_ring()中完成横向扫描拐点检测 */
 
     /* 基于分段的中点偏移分类 (主要) */
     seg_elem = detect_element_segment();
+
+    /* 环岛检测: 如果 segment 检测像转弯, 确认前面远处是否还有路
+       (环岛和转弯的区别: 转弯前面没路了, 环岛岛后面还有路) */
+    if (seg_elem == RIGHT_ANGLE_l || seg_elem == RIGHT_ANGLE_r)
+    {
+        TRACK_ELEMENT ring_elem;
+        ring_elem = detect_ring(seg_elem);
+        if (ring_elem != NONE)
+            return ring_elem;
+    }
+
     if (seg_elem != STRAIGHT)
         return seg_elem;
 

@@ -15,7 +15,7 @@ static const track_fsm_cfg_t s_default_cfg[TRACK_FSM_CFG_COUNT] =
 	/* RING_c 环岛中心 */   {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,3},
 	/* CROSS 十字路口 */    {0.30f,0.03f,0.20f,2.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.85f, PLAN_CROSS,      0.75f,2},
 	/* BROKEN 断桥通过中 */ {0.25f,0.02f,0.15f,2.0f, 0.20f,0.00f,0.35f,0.0f, 0.05f,0.90f, PLAN_HOLD,       0.45f,3},
-	/* BROKEN_RODE 断桥后 */{1.00f,0.00f,2.00f,0.0f, 0.00f,0.00f,0.00f,0.0f, 0.00f,0.60f, PLAN_BROKEN,     0.50f,1}
+	/* BROKEN_RODE 断桥后 */{1.00f,0.00f,2.00f,0.0f, 0.00f,0.00f,0.00f,0.0f, 0.00f,0.60f, PLAN_BROKEN,     0.50f,2}
 };
 
 void track_fsm_init(track_fsm_t *fsm)
