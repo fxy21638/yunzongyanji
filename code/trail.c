@@ -673,8 +673,8 @@ TRACK_ELEMENT track_element_judge(void)
     if (seg_elem != STRAIGHT)
         return seg_elem;
 
-    /* 回退: 宽度法十字检测 */
-    if (g_track.feature == VISION_FEATURE_CROSS || detect_cross_scene())
+    /* 回退: 宽度法十字检测 (不再盲信视觉层 VISION_FEATURE_CROSS, 宽弯道会误触发) */
+    if (detect_cross_scene())
         return CROSS;
 
     return STRAIGHT;
