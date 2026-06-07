@@ -8,7 +8,7 @@
 - **IMU**: ICM42686 通过 SPI_2 (P02=CS, P03=MOSI, P04=MISO, P05=SCLK, 10MHz Mode 0)
 - **舵机**: 转向, 范围 [70,110], 映射: `servo = 90 + wheel_angle × 2.0`, 限制 ±10°
 - **构建**: Keil 工程 `KYPROJECT`
-- **语言**: 所有注释、提交信息、文档一律用中文
+- **语言**: 所有注释、提交信息、文档一律用中文，提交信息不加 @ 符号
 
 ## 架构 — 3 层循迹管线
 
@@ -65,13 +65,12 @@ vision_track.c  →  trail.c  →  control.c
 - EMA 转向输出: `steer_smooth * 0.2 + steer_output * 0.8`
 - 陀螺仪 (yaw) 仅用于 BROKEN_RODE 航向保持, 不用于普通转弯
 
-## PID 架构 — 禁止修改
+## PID 架构
 
 - **用户明确声明: "这是一个很成熟的PID架构了，可以不改这个架构实现功能的"**
-- `PositionalPID`: 仅 Kp, Kd — 无 Ki, 无积分项, 不要添加字段
+- `PositionalPID`: Kp, Kd, Ki, integral — 位置环 Ki=0, 角度环可调 Ki
 - `IncrementalPID`: Kp, Ki, error_prev — 仅用于速度控制
-- `AnglePID`: KP, KP2, KD, GKD, error_prev — 当 CASCADE_PID != 1 时使用
-- PID 参数定义在 `pid.c`, 不在头文件
+- PID 参数定义在 `pid.c`
 
 ## 关键常量
 
@@ -82,7 +81,6 @@ vision_track.c  →  trail.c  →  control.c
 | VISION_LOOKAHEAD_Y | HEIGHT-35 = 85 | vision_track.h |
 | STEER_OUTPUT_LIMIT | 20.0f | control.h |
 | FIXED_PWM_DUTY | 600 | control.c:11 |
-| CASCADE_PID | 2 (默认) | pid.h:5 |
 
 ## 已知陷阱和经验
 
@@ -123,7 +121,7 @@ vision_track.c  →  trail.c  →  control.c
 ### Trail / 元素分类
 
 - `plan_straight_center` 权重: `(near_mid + far_mid * 2) / 3` — 偏好远点 (67%) 使循迹更平滑
-- `plan_turn_center`: 道路中心估计 — 双边可见→(L+R)/2, 单边丢线(非十字)→可见边±半道宽, 十字→CENTER_POINT
+- `plan_turn_center`: 道路中心估计 — 双边可见→(L+R)/2, 单边丢线(非十字)→可见边±半道宽, 十字→CENTER_POINT, 最后加 `TRACK_TURN_BIAS` 偏置 (6px)
 - 十字检测: `base_w` 从底部行 (HEIGHT-25 到 HEIGHT-5) 计算, 非中间行。阈值: `w > base_w + base_w/3`
 - 弯道检测: `dx > lane_w/6` (原 lane_w/5), 需要 ≥9 行丢边
 

@@ -227,8 +227,8 @@ static void stabilize_cross_boundaries(const vision_track_result_t *track, int16
 	uint16_t y_fit_end;
 	static uint8_t cross_hold = 0;
 
-	// 十字滞回：进入需要 feature==CROSS，退出需要连续 4 帧非 CROSS
-	if (track->feature == VISION_FEATURE_CROSS)
+	// 直接使用 trail 层 FSM 过滤后的元素判断，FSM 已含滞回
+	if (track_element == CROSS)
 	{
 		cross_hold = 4;
 	}
@@ -861,12 +861,11 @@ static void draw_element_indicator(uint8_t *out, TRACK_ELEMENT elem)
     int16_t x0;
     int16_t y0;
 
-    (void)elem;
     x0 = (int16_t)(MT9V034_WIDTH - 20);
     y0 = (int16_t)(MT9V034_HEIGHT - 12);
 
-    tens = (uint8_t)track_element / 10;
-    ones = (uint8_t)track_element % 10;
+    tens = (uint8_t)elem / 10;
+    ones = (uint8_t)elem % 10;
 
     if (tens > 0)
     {

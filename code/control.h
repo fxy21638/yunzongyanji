@@ -3,8 +3,6 @@
 
 #include "ky_headfile.h"
 
-#define CASCADE_PID (1)
-
 #include "trail.h"
 #include "pid.h"
 
@@ -18,7 +16,6 @@
 
 extern float speed_base;
 extern float gyro_target;
-extern float gyro_control;
 extern uint8_t turn_step;
 
 extern float speed_l;
@@ -31,12 +28,7 @@ void control_set_speed_tune_mode(uint8_t enable);
 void all_control(void);
 void motor_speed_control(void);
 void steering_control(void);
-#if (CASCADE_PID == 1)
 void motor_speed_position_control(void);
-#elif (CASCADE_PID == 2)
-void motor_agle_control(void);
-void motor_inertia_control(void);
-#endif
 void motor_clear(void);
 
 #endif

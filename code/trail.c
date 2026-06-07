@@ -20,6 +20,8 @@
 #define CROSS_MIN_STREAK 3
 #define CROSS_TOUCH_MARGIN 4
 #define CROSS_WIDE_EXTRA_NUM 5
+/* 转弯目标偏置: 向弯道内侧偏移, 越大切入越深 (3~10) */
+#define TRACK_TURN_BIAS 6
 
 // Pure Pursuit parameters
 #define PP_LOOKAHEAD_MIN 12
@@ -368,7 +370,7 @@ static int16_t detect_cross_break_row(void)
     in_cross = 0;
     narrow_streak = 0;
 
-    for (y = (int16_t)(MT9V034_HEIGHT - 1); y >= (int16_t)(MT9V034_HEIGHT / 4); y--)
+    for (y = (int16_t)(MT9V034_HEIGHT - 4); y >= (int16_t)(MT9V034_HEIGHT / 4); y--)
     {
         l = g_track.left[(uint16_t)y];
         r = g_track.right[(uint16_t)y];
@@ -576,10 +578,22 @@ static TRACK_ELEMENT detect_element_segment(void)
     w_near = r_near - l_near + 1;
     w_far = r_far - l_far + 1;
 
-    /* 十字: 两行很宽且双边可追踪 */
-    if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
+    /* 宽赛道: 先看中线偏移区分弯道/十字 (弯道优先, 防止宽右弯误判十字) */
+    if (near_left_ok && near_right_ok && far_left_ok && far_right_ok
+        && w_near > (int16_t)(MT9V034_WIDTH * 3 / 4)
+        && w_far > (int16_t)(MT9V034_WIDTH * 3 / 4))
     {
-        if (w_near > (int16_t)(MT9V034_WIDTH * 3 / 4) && w_far > (int16_t)(MT9V034_WIDTH * 3 / 4))
+        c_near = (l_near + r_near) / 2;
+        c_far = (l_far + r_far) / 2;
+        dx = c_far - c_near;
+
+        if (dx > 5)
+            return RIGHT_ANGLE_r;
+        if (dx < -5)
+            return RIGHT_ANGLE_l;
+
+        if (c_near > (int16_t)(CENTER_POINT - 20) && c_near < (int16_t)(CENTER_POINT + 20)
+            && c_far  > (int16_t)(CENTER_POINT - 18) && c_far  < (int16_t)(CENTER_POINT + 18))
             return CROSS;
     }
 
@@ -598,19 +612,37 @@ static TRACK_ELEMENT detect_element_segment(void)
                 return RIGHT_ANGLE_l;
         }
 
-        /* 平滑弯道: 双边可追踪, 远行中线偏移 */
+        /* 平滑弯道: 双边可追踪, 远行中线偏移 (赛道宽度正常) */
         if (far_left_ok && far_right_ok)
         {
             c_near = (l_near + r_near) / 2;
             c_far = (l_far + r_far) / 2;
             dx = c_far - c_near;
 
-            /* TODO: 弯道检测灵敏度, 越小越早触发 (3~8) */
             if (dx > 4)
                 return RIGHT_ANGLE_r;
             if (dx < -4)
                 return RIGHT_ANGLE_l;
         }
+    }
+    /* 单边可见 + 边界弯曲 → 弯道 (近行一边丢线, 靠可见边界曲率判断) */
+    else if (near_left_ok && far_left_ok)
+    {
+        /* 只有左边界: 向左弯曲 → 左弯, 向右弯曲 → 右弯 */
+        dx = l_far - l_near;
+        if (dx > 6)
+            return RIGHT_ANGLE_r;
+        if (dx < -6)
+            return RIGHT_ANGLE_l;
+    }
+    else if (near_right_ok && far_right_ok)
+    {
+        /* 只有右边界: 向左弯曲 → 左弯, 向右弯曲 → 右弯 */
+        dx = r_far - r_near;
+        if (dx > 6)
+            return RIGHT_ANGLE_r;
+        if (dx < -6)
+            return RIGHT_ANGLE_l;
     }
 
     return STRAIGHT;
@@ -675,8 +707,6 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
     uint16_t far_y;
     uint8_t far_left_ok, far_right_ok;
 
-    (void)turn_type;
-
     far_y = (uint16_t)VISION_LOOKAHEAD_Y;
     l_far = g_track.left[far_y];
     r_far = g_track.right[far_y];
@@ -729,6 +759,12 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
     {
         target = r_far - lane_w / 2;
     }
+
+    /* 向弯道内侧偏移, 增大切入力度 */
+    if (turn_type == RIGHT_ANGLE_r)
+        target += (int16_t)TRACK_TURN_BIAS;
+    else if (turn_type == RIGHT_ANGLE_l)
+        target -= (int16_t)TRACK_TURN_BIAS;
 
     return clamp_center_to_target(target);
 }
@@ -816,6 +852,10 @@ static void report_track_element_if_changed(void)
  * ================================================================ */
 static void trail_fsm_on_entry(TRACK_ELEMENT state)
 {
+    /* 切换元素时清零积分, 防止上一段积分值在新Ki下产生跳变 */
+    pid_pos.integral = 0.0f;
+    pid_gyro.integral = 0.0f;
+
     /* 锁定航向: 直道保持姿态, 断桥保持冲出方向 */
     if (state == STRAIGHT || state == BROKEN_RODE)
     {

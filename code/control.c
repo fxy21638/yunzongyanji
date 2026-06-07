@@ -26,7 +26,6 @@ float speed_base = 65;
 #define ANGLE_BLEND_KD     0.50f
 
 float gyro_target = 0;
-float gyro_control = 60;
 uint8_t turn_step = 0;
 
 float speed_l = 0;
@@ -200,15 +199,9 @@ void steering_control(void)
             fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
             fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
 
-#if (CASCADE_PID == 1)
             pid_gyro.Kp = fsm_Kp;
             pid_gyro.Kd = fsm_Kd;
             steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
-#else
-            inertia_pid.Kp = fsm_Kp;
-            inertia_pid.Kd = fsm_Kd;
-            steer_output = PositionalPID_Calculate(&inertia_pid, gyro_target - yaw);
-#endif
         }
         else
         {
@@ -218,15 +211,9 @@ void steering_control(void)
             fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
             fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
 
-#if (CASCADE_PID == 1)
             pid_pos.Kp = fsm_Kp;
             pid_pos.Kd = fsm_Kd;
             steer_output = PositionalPID_Calculate(&pid_pos, pp_err);
-#else
-            angle_pid.KP  = fsm_Kp;
-            angle_pid.KD  = fsm_Kd;
-            steer_output = AnglePID_Calculate(&angle_pid, pp_err);
-#endif
             steer_output = pp_err * pp_gain;
         }
 
@@ -245,6 +232,13 @@ void steering_control(void)
         float ema_alpha;
         float fsm_Kp;
         float fsm_Kd;
+        float fsm_Ki;
+        float fsm_imax;
+        float fsm_angle_kp;
+        float fsm_angle_ki;
+        float fsm_angle_kd;
+        float fsm_angle_imax;
+        float fsm_angle_w;
         static float steer_smooth = 0.0f;
 
         track_error = (float)CENTER_POINT - (float)track_midpoint_target;
@@ -254,16 +248,14 @@ void steering_control(void)
     {
         fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
         fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
+        fsm_Ki = track_fsm_get_Ki(&g_track_fsm);
+        fsm_imax = track_fsm_get_integral_max(&g_track_fsm);
 
-#if (CASCADE_PID == 1)
         pid_gyro.Kp = fsm_Kp;
         pid_gyro.Kd = fsm_Kd;
+        pid_gyro.Ki = fsm_Ki;
+        pid_gyro.integral_max = fsm_imax;
         steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
-#else
-        inertia_pid.Kp = fsm_Kp;
-        inertia_pid.Kd = fsm_Kd;
-        steer_output = PositionalPID_Calculate(&inertia_pid, gyro_target - yaw);
-#endif
     }
     else
     {
@@ -273,6 +265,13 @@ void steering_control(void)
 
         fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
         fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
+        fsm_Ki = track_fsm_get_Ki(&g_track_fsm);
+        fsm_imax = track_fsm_get_integral_max(&g_track_fsm);
+        fsm_angle_kp = track_fsm_get_angle_kp(&g_track_fsm);
+        fsm_angle_ki = track_fsm_get_angle_ki(&g_track_fsm);
+        fsm_angle_kd = track_fsm_get_angle_kd(&g_track_fsm);
+        fsm_angle_imax = track_fsm_get_angle_imax(&g_track_fsm);
+        fsm_angle_w  = track_fsm_get_angle_weight(&g_track_fsm);
 
         /* 图像赛道方向: 中线近远偏移 */
         {
@@ -302,24 +301,22 @@ void steering_control(void)
             }
         }
 
-#if (CASCADE_PID == 1)
         /* 位置 PID */
         pid_pos.Kp = fsm_Kp;
         pid_pos.Kd = fsm_Kd;
+        pid_pos.Ki = fsm_Ki;
+        pid_pos.integral_max = fsm_imax;
         pos_out = PositionalPID_Calculate(&pid_pos, track_error);
 
         /* 角度 PID: 赛道右偏(dx>0) → 右转(-dx<0) */
-        pid_gyro.Kp = ANGLE_BLEND_KP;
-        pid_gyro.Kd = ANGLE_BLEND_KD;
+        pid_gyro.Kp = fsm_angle_kp;
+        pid_gyro.Ki = fsm_angle_ki;
+        pid_gyro.Kd = fsm_angle_kd;
+        pid_gyro.integral_max = fsm_angle_imax;
         ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
 
-        steer_output = pos_out * (1.0f - ANGLE_BLEND_WEIGHT)
-                     + ang_out * ANGLE_BLEND_WEIGHT;
-#else
-        angle_pid.KP  = fsm_Kp;
-        angle_pid.KD  = fsm_Kd;
-        steer_output = AnglePID_Calculate(&angle_pid, track_error);
-#endif
+        steer_output = pos_out * (1.0f - fsm_angle_w)
+                     + ang_out * fsm_angle_w;
     }
 
     steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
@@ -332,28 +329,8 @@ void steering_control(void)
 #endif
 }
 
-#if (CASCADE_PID == 1)
 void motor_speed_position_control(void)
 {
     motor_speed_control();
     steering_control();
 }
-#elif (CASCADE_PID == 2)
-void motor_agle_control(void)
-{
-    motor_speed_control();
-    steering_control();
-}
-
-void motor_inertia_control(void)
-{
-    motor_speed_control();
-    steering_control();
-}
-#elif (CASCADE_PID == 3)
-void motor_agle_control(void)
-{
-    motor_speed_control();
-    steering_control();
-}
-#endif

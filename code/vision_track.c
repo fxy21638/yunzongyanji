@@ -1010,13 +1010,67 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
         Hightest = 0;
     }
 
-    // 8. 中线 = (L+R)/2
+    // 8. 中线 = 道路中心估计（双边可见→均值, 单边丢线→可见边±半道宽, 十字→中心）
     {
         int ii;
+        int16_t lane_w, half_w;
+        int16_t ln, rn;
+        uint16_t near_y;
+
+        // 从近行取道宽（双边可见时）
+        lane_w = 65;
+        near_y = (uint16_t)(IMG_H - 18);
+        ln = (int16_t)L_Border[near_y];
+        rn = (int16_t)R_Border[near_y];
+        if (ln > (int16_t)BORDER_MIN && rn < (int16_t)BORDER_MAX)
+        {
+            lane_w = rn - ln + 1;
+        }
+        if (lane_w < 25) lane_w = 65;
+        if (lane_w > 160) lane_w = 160;
+        half_w = lane_w / 2;
+
         for (ii = (int)Hightest; ii < (int)(IMG_H - 1); ii++)
         {
-            Center_Line_arr[ii] = (uint8_t)(
-                ((uint16_t)L_Border[ii] + (uint16_t)R_Border[ii]) >> 1);
+            int16_t l, r, mid_val;
+            uint8_t lok, rok;
+
+            l = (int16_t)L_Border[ii];
+            r = (int16_t)R_Border[ii];
+
+            // 阈值与 detect_element_segment 一致: L>2 为有效, R<IMG_W-4 为有效
+            lok = (l > 2) ? 1 : 0;
+            rok = (r < (int16_t)(IMG_W - 4)) ? 1 : 0;
+
+            if (!lok && !rok)
+            {
+                // 双边丢线 → 直行
+                mid_val = (int16_t)(IMG_W / 2);
+            }
+            // 十字路口: 双边都在边界
+            else if (l <= 5 && r >= (int16_t)(IMG_W - 5))
+            {
+                mid_val = (int16_t)(IMG_W / 2);
+            }
+            // 双边可见: (L+R)/2
+            else if (lok && rok)
+            {
+                mid_val = (l + r) / 2;
+            }
+            // 右边界丢线: 道路中心 = 左边界 + 半道宽
+            else if (lok && !rok)
+            {
+                mid_val = l + half_w;
+            }
+            // 左边界丢线: 道路中心 = 右边界 - 半道宽
+            else
+            {
+                mid_val = r - half_w;
+            }
+
+            if (mid_val < 0) mid_val = 0;
+            if (mid_val > (int16_t)(IMG_W - 1)) mid_val = (int16_t)(IMG_W - 1);
+            Center_Line_arr[ii] = (uint8_t)mid_val;
         }
     }
 

@@ -3,19 +3,20 @@
 track_fsm_t g_track_fsm;
 
 static const track_fsm_cfg_t s_default_cfg[TRACK_FSM_CFG_COUNT] =
-    {
-        /* NONE 无效 */ {0.20f, 0.18f, 0.80f, PLAN_HOLD, 0.0f, 1},
-        /* START 发车 */ {0.20f, 0.18f, 0.80f, PLAN_STRAIGHT, 0.50f, 1},
-        /* STRAIGHT 直道 */ {0.22f, 0.15f, 0.78f, PLAN_STRAIGHT, 1.0f, 2},
-        /* TODO: Kp控制转向力度(0.6~1.2), Kd抑制震荡(0.3~0.5), 第6参数debounce=5帧 */
-        /* RIGHT_ANGLE_l */ {0.85f, 0.40f, 0.70f, PLAN_TURN_LEFT, 0.55f, 5},
-        /* RIGHT_ANGLE_r */ {0.85f, 0.40f, 0.70f, PLAN_TURN_RIGHT, 0.55f, 5},
-        /* RING_l 左环岛 */ {0.19f, 0.17f, 0.78f, PLAN_STRAIGHT, 0.65f, 3},
-        /* RING_r 右环岛 */ {0.19f, 0.17f, 0.78f, PLAN_STRAIGHT, 0.65f, 3},
-        /* RING_c 环岛中心 */ {0.19f, 0.17f, 0.78f, PLAN_STRAIGHT, 0.65f, 3},
-        /* CROSS 十字路口 */ {0.16f, 0.14f, 0.85f, PLAN_CROSS, 0.75f, 2},
-        /* BROKEN 断桥通过中 */ {0.15f, 0.10f, 0.90f, PLAN_HOLD, 0.45f, 3},
-        /* BROKEN_RODE 断桥已过 */ {0.70f, 1.70f, 0.60f, PLAN_BROKEN, 0.50f, 1}};
+{   
+	/*                      Kp     Ki    Kd    imax  aKp   aKi   aKd   aImax aW    EMA    plan             spd  db */
+	/* NONE 无效 */         {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.00f,0.80f, PLAN_HOLD,       0.0f, 1},
+	/* START 发车 */        {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.80f, PLAN_STRAIGHT,   0.50f,1},
+	/* STRAIGHT 直道 */     {0.40f,0.04f,0.28f,4.0f, 0.30f,0.02f,0.45f,2.0f, 0.20f,0.80f, PLAN_STRAIGHT,   1.0f, 2},
+	/* RIGHT_ANGLE_l 左弯 */{0.50f,0.08f,0.38f,8.0f, 0.45f,0.06f,0.55f,6.0f, 0.35f,0.75f, PLAN_TURN_LEFT,  0.55f,5},
+	/* RIGHT_ANGLE_r 右弯 */{0.50f,0.08f,0.38f,8.0f, 0.45f,0.06f,0.55f,6.0f, 0.35f,0.75f, PLAN_TURN_RIGHT, 0.55f,5},
+	/* RING_l 左环岛 */     {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,3},
+	/* RING_r 右环岛 */     {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,3},
+	/* RING_c 环岛中心 */   {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,3},
+	/* CROSS 十字路口 */    {0.30f,0.03f,0.20f,2.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.85f, PLAN_CROSS,      0.75f,2},
+	/* BROKEN 断桥通过中 */ {0.25f,0.02f,0.15f,2.0f, 0.20f,0.00f,0.35f,0.0f, 0.05f,0.90f, PLAN_HOLD,       0.45f,3},
+	/* BROKEN_RODE 断桥后 */{1.00f,0.00f,2.00f,0.0f, 0.00f,0.00f,0.00f,0.0f, 0.00f,0.60f, PLAN_BROKEN,     0.50f,1}
+};
 
 void track_fsm_init(track_fsm_t *fsm)
 {
@@ -97,6 +98,24 @@ float track_fsm_get_Kd(const track_fsm_t *fsm)
     return fsm->cfg[idx].Kd;
 }
 
+float track_fsm_get_Ki(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        return 0.00f;
+    return fsm->cfg[idx].Ki;
+}
+
+float track_fsm_get_integral_max(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        return 0.0f;
+    return fsm->cfg[idx].integral_max;
+}
+
 float track_fsm_get_ema_alpha(const track_fsm_t *fsm)
 {
     uint8_t idx;
@@ -104,6 +123,51 @@ float track_fsm_get_ema_alpha(const track_fsm_t *fsm)
     if (idx >= TRACK_FSM_CFG_COUNT)
         return 0.80f;
     return fsm->cfg[idx].ema_alpha;
+}
+
+float track_fsm_get_angle_kp(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        return 0.30f;
+    return fsm->cfg[idx].angle_kp;
+}
+
+float track_fsm_get_angle_ki(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        return 0.00f;
+    return fsm->cfg[idx].angle_ki;
+}
+
+float track_fsm_get_angle_kd(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        return 0.45f;
+    return fsm->cfg[idx].angle_kd;
+}
+
+float track_fsm_get_angle_imax(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        return 0.0f;
+    return fsm->cfg[idx].angle_imax;
+}
+
+float track_fsm_get_angle_weight(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        return 0.20f;
+    return fsm->cfg[idx].angle_weight;
 }
 
 float track_fsm_get_speed_factor(const track_fsm_t *fsm)
