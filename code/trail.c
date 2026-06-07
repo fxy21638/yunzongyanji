@@ -1,4 +1,4 @@
-// Track element classification + Pure Pursuit target planning
+﻿// Track element classification + Pure Pursuit target planning
 // Uses bird's-eye view midline point set (when VISION_USE_WALLFOLLOW=1)
 // Falls back to per-row mid array (original mode)
 
@@ -11,24 +11,23 @@
 #include "track_fsm.h"
 
 #define TRACK_LOOKAHEAD_Y_NEAR (MT9V034_HEIGHT - 22)
-#define TRACK_LOOKAHEAD_Y_FAR  (MT9V034_HEIGHT / 2)
-#define TRACK_EDGE_NEAR_TH     3
-#define TRACK_WIDE_TH          (MT9V034_WIDTH * 7 / 10)
+#define TRACK_LOOKAHEAD_Y_FAR (MT9V034_HEIGHT / 2)
+#define TRACK_EDGE_NEAR_TH 3
+#define TRACK_WIDE_TH (MT9V034_WIDTH * 7 / 10)
 
 #define TRAIL_DBG_PRINTF 0
-#define TRACK_TURN_SHIFT       28
 #define TRACK_MIN_VALID_TURN_ROWS 8
-#define CROSS_MIN_STREAK       3
-#define CROSS_TOUCH_MARGIN     4
-#define CROSS_WIDE_EXTRA_NUM   5
+#define CROSS_MIN_STREAK 3
+#define CROSS_TOUCH_MARGIN 4
+#define CROSS_WIDE_EXTRA_NUM 5
 
 // Pure Pursuit parameters
-#define PP_LOOKAHEAD_MIN  12
-#define PP_LOOKAHEAD_MAX  70
-#define PP_LOOKAHEAD_SCALE 4  // lookahead = speed / SCALE (pixels)
+#define PP_LOOKAHEAD_MIN 12
+#define PP_LOOKAHEAD_MAX 70
+#define PP_LOOKAHEAD_SCALE 4 // lookahead = speed / SCALE (pixels)
 
 // VOFA+ firewater debug output via CDC
-#define VOFA_FIREWATER 1
+#define VOFA_FIREWATER 0
 #if VOFA_FIREWATER
 #define VOFA_FLOAT_COUNT 10
 #endif
@@ -45,10 +44,10 @@ uint8_t track_midpoint_target = CENTER_POINT;
 uint8_t track_midpoint_target_P = CENTER_POINT;
 
 // Pure Pursuit state
-float pp_steering_angle = 0.0f;   // output steering angle (degrees)
-float pp_lookahead_dist = 25.0f;  // current lookahead distance
-float pp_curvature = 0.0f;        // estimated road curvature (×1000)
-uint8_t pp_visible_high = 120;    // visible track distance
+float pp_steering_angle = 0.0f;  // output steering angle (degrees)
+float pp_lookahead_dist = 25.0f; // current lookahead distance
+float pp_curvature = 0.0f;       // estimated road curvature (×1000)
+uint8_t pp_visible_high = 120;   // visible track distance
 
 uint8_t start_stage = 0;
 uint8_t broken_flag = 0;
@@ -58,18 +57,30 @@ static const char *track_element_name(TRACK_ELEMENT element)
 {
     switch (element)
     {
-    case NONE: return "NONE";
-    case START: return "START";
-    case STRAIGHT: return "STRAIGHT";
-    case RIGHT_ANGLE_l: return "RIGHT_ANGLE_L";
-    case RIGHT_ANGLE_r: return "RIGHT_ANGLE_R";
-    case RING_l: return "RING_L";
-    case RING_r: return "RING_R";
-    case RING_c: return "RING_C";
-    case CROSS: return "CROSS";
-    case BROKEN: return "BROKEN";
-    case BROKEN_RODE: return "BROKEN_ROAD";
-    default: return "UNKNOWN";
+    case NONE:
+        return "NONE";
+    case START:
+        return "START";
+    case STRAIGHT:
+        return "STRAIGHT";
+    case RIGHT_ANGLE_l:
+        return "RIGHT_ANGLE_L";
+    case RIGHT_ANGLE_r:
+        return "RIGHT_ANGLE_R";
+    case RING_l:
+        return "RING_L";
+    case RING_r:
+        return "RING_R";
+    case RING_c:
+        return "RING_C";
+    case CROSS:
+        return "CROSS";
+    case BROKEN:
+        return "BROKEN";
+    case BROKEN_RODE:
+        return "BROKEN_ROAD";
+    default:
+        return "UNKNOWN";
     }
 }
 
@@ -101,9 +112,11 @@ static float pure_pursuit_angle(const vision_track_result_t *track, float lookah
         float dist;
         float diff;
         dist = (float)track->mid_dist[i];
-        if (dist < 1.0f) continue;
+        if (dist < 1.0f)
+            continue;
         diff = dist - lookahead;
-        if (diff < 0.0f) diff = -diff;
+        if (diff < 0.0f)
+            diff = -diff;
         if (diff < min_diff)
         {
             min_diff = diff;
@@ -116,7 +129,8 @@ static float pure_pursuit_angle(const vision_track_result_t *track, float lookah
 
     dx = target_x - vehicle_x;
     dy = vehicle_y - target_y;
-    if (dy < 1.0f) dy = 1.0f;
+    if (dy < 1.0f)
+        dy = 1.0f;
 
     angle = atan2f(dx, dy) * 180.0f / 3.14159265358979f;
     return angle;
@@ -140,9 +154,12 @@ static float compute_road_curvature(const vision_track_result_t *track)
         uint8_t p0[2], p1[2], p2[2];
         uint8_t n;
         n = track->left_bev_step;
-        p0[0] = track->left_bev[0][0];     p0[1] = track->left_bev[0][1];
-        p1[0] = track->left_bev[n / 2][0]; p1[1] = track->left_bev[n / 2][1];
-        p2[0] = track->left_bev[n - 1][0]; p2[1] = track->left_bev[n - 1][1];
+        p0[0] = track->left_bev[0][0];
+        p0[1] = track->left_bev[0][1];
+        p1[0] = track->left_bev[n / 2][0];
+        p1[1] = track->left_bev[n / 2][1];
+        p2[0] = track->left_bev[n - 1][0];
+        p2[1] = track->left_bev[n - 1][1];
         curv_l = (float)pts_curvature_3pt(p0, p1, p2) / 1000.0f;
         cnt++;
     }
@@ -152,15 +169,20 @@ static float compute_road_curvature(const vision_track_result_t *track)
         uint8_t p0[2], p1[2], p2[2];
         uint8_t n;
         n = track->right_bev_step;
-        p0[0] = track->right_bev[0][0];     p0[1] = track->right_bev[0][1];
-        p1[0] = track->right_bev[n / 2][0]; p1[1] = track->right_bev[n / 2][1];
-        p2[0] = track->right_bev[n - 1][0]; p2[1] = track->right_bev[n - 1][1];
+        p0[0] = track->right_bev[0][0];
+        p0[1] = track->right_bev[0][1];
+        p1[0] = track->right_bev[n / 2][0];
+        p1[1] = track->right_bev[n / 2][1];
+        p2[0] = track->right_bev[n - 1][0];
+        p2[1] = track->right_bev[n - 1][1];
         curv_r = (float)pts_curvature_3pt(p0, p1, p2) / 1000.0f;
         cnt++;
     }
 
-    if (cnt == 0) return 0.0f;
-    if (cnt == 1) return curv_l + curv_r; // one of them is 0
+    if (cnt == 0)
+        return 0.0f;
+    if (cnt == 1)
+        return curv_l + curv_r; // one of them is 0
     return (curv_l + curv_r) / 2.0f;
 }
 
@@ -179,7 +201,8 @@ float trail_speed_factor(void)
 
     // Curvature-based reduction
     abs_curv = pp_curvature;
-    if (abs_curv < 0.0f) abs_curv = -abs_curv;
+    if (abs_curv < 0.0f)
+        abs_curv = -abs_curv;
     if (abs_curv > 0.05f)
     {
         factor = 0.6f;
@@ -192,14 +215,20 @@ float trail_speed_factor(void)
     // Visibility-based reduction
     high = pp_visible_high;
     vis_factor = 1.0f;
-    if (high > 60)      vis_factor = 1.0f;
-    else if (high > 40) vis_factor = 0.8f;
-    else if (high > 20) vis_factor = 0.6f;
-    else                vis_factor = 0.4f;
+    if (high > 60)
+        vis_factor = 1.0f;
+    else if (high > 40)
+        vis_factor = 0.8f;
+    else if (high > 20)
+        vis_factor = 0.6f;
+    else
+        vis_factor = 0.4f;
 
     // Take the more conservative factor
-    if (vis_factor < factor) factor = vis_factor;
-    if (factor < 0.3f) factor = 0.3f;
+    if (vis_factor < factor)
+        factor = vis_factor;
+    if (factor < 0.3f)
+        factor = 0.3f;
 
     return factor;
 }
@@ -222,7 +251,8 @@ static uint8_t count_cross_rows(const vision_track_result_t *track)
     {
         l = track->left[y];
         r = track->right[y];
-        if (l < 0 || r < 0) continue;
+        if (l < 0 || r < 0)
+            continue;
 
         w = (uint16_t)(r - l + 1);
         if (w > (uint16_t)TRACK_WIDE_TH &&
@@ -244,18 +274,22 @@ static uint8_t count_cross_rows(const vision_track_result_t *track)
  * ================================================================ */
 static uint8_t clamp_center_to_target(int16_t center_x)
 {
-    if (center_x < 0)   return track_midpoint_target_P;
-    if (center_x > 255) return 255;
+    if (center_x < 0)
+        return 0;
+    if (center_x > 255)
+        return 255;
     return (uint8_t)center_x;
 }
 
 static uint16_t get_broken_progress(void)
 {
     int16_t left_abs, right_abs;
-    left_abs  = encoder_data_dir[0];
+    left_abs = encoder_data_dir[0];
     right_abs = encoder_data_dir[1];
-    if (left_abs < 0)  left_abs  = -left_abs;
-    if (right_abs < 0) right_abs = -right_abs;
+    if (left_abs < 0)
+        left_abs = -left_abs;
+    if (right_abs < 0)
+        right_abs = -right_abs;
     return (uint16_t)((left_abs + right_abs) / 2);
 }
 
@@ -269,7 +303,8 @@ static uint8_t broken_judged(void)
 {
     broken_flag = 1;
     judge_distance += get_broken_progress();
-    if (judge_distance > BROKEN_LENTH) return 1;
+    if (judge_distance > BROKEN_LENTH)
+        return 1;
     return 0;
 }
 
@@ -294,7 +329,8 @@ static int16_t average_lane_width(uint16_t y0, uint16_t y1)
     sum = 0;
     cnt = 0;
 
-    if (y1 >= MT9V034_HEIGHT) y1 = MT9V034_HEIGHT - 1;
+    if (y1 >= MT9V034_HEIGHT)
+        y1 = MT9V034_HEIGHT - 1;
 
     for (y = y0; y <= y1; y++)
     {
@@ -307,7 +343,8 @@ static int16_t average_lane_width(uint16_t y0, uint16_t y1)
         }
     }
 
-    if (cnt == 0) return (int16_t)(MT9V034_WIDTH / 3);
+    if (cnt == 0)
+        return (int16_t)(MT9V034_WIDTH / 3);
     return (int16_t)(sum / cnt);
 }
 
@@ -324,7 +361,8 @@ static int16_t detect_cross_break_row(void)
     margin = (int16_t)CROSS_TOUCH_MARGIN;
     base_w = average_lane_width((uint16_t)(MT9V034_HEIGHT - 25),
                                 (uint16_t)(MT9V034_HEIGHT - 5));
-    if (base_w < 8) return -1;
+    if (base_w < 8)
+        return -1;
 
     cross_start = -1;
     in_cross = 0;
@@ -334,25 +372,29 @@ static int16_t detect_cross_break_row(void)
     {
         l = g_track.left[(uint16_t)y];
         r = g_track.right[(uint16_t)y];
-        if (l < 0 || r < 0) continue;
+        if (l < 0 || r < 0)
+            continue;
 
         w = r - l + 1;
         if (w > base_w + base_w / 5 ||
             (w > base_w + 12 &&
              (l <= margin || r >= (int16_t)(MT9V034_WIDTH - 1 - margin))))
         {
-            if (!in_cross) in_cross = 1;
+            if (!in_cross)
+                in_cross = 1;
             cross_start = y;
             narrow_streak = 0;
         }
         else if (in_cross)
         {
             narrow_streak++;
-            if (narrow_streak >= CROSS_MIN_STREAK) return cross_start;
+            if (narrow_streak >= CROSS_MIN_STREAK)
+                return cross_start;
         }
     }
 
-    if (in_cross && cross_start >= 0) return cross_start;
+    if (in_cross && cross_start >= 0)
+        return cross_start;
     return -1;
 }
 
@@ -361,33 +403,218 @@ static uint8_t detect_cross_scene(void)
     return (detect_cross_break_row() >= 0) ? 1 : 0;
 }
 
-static TRACK_ELEMENT detect_turn_scene(void)
+/* ================================================================
+ * Ring / 圆环 detection (from opencvTest.cpp reference)
+ *
+ * Principle: when a ring branches off one side, that side's boundary
+ * ends earlier while the opposite boundary continues.  The entry is
+ * found by scanning horizontally from the longer-edge side toward the
+ * shorter-edge side, looking for the ring's inner boundary.
+ *
+ * TODO: needs binary image access for horizontal scan (ring corner
+ *       detection).  Currently works with boundary arrays only —
+ *       will miss the inner ring boundary if it's >2px inside the
+ *       tracked edge.
+ * TODO: integrate into track_element_judge() and FSM once corner
+ *       detection is validated on real track images.
+ * ================================================================ */
+#define RING_LEN_DIFF_TH  40   /* TODO: min edge-length diff for ring (pixels) */
+#define RING_GAP_STREAK    5   /* TODO: consecutive rows to confirm ring gap */
+#define RING_EDGE_SHIFT   25   /* TODO: edge position shift at ring entry */
+
+static TRACK_ELEMENT detect_ring(void)
 {
-    int16_t near_mid, far_mid, lane_w, dx;
     uint16_t y;
-    uint8_t left_edge_lost, right_edge_lost;
-    int16_t el, er;
+    uint16_t left_cnt, right_cnt;
+    uint16_t left_end_y, right_end_y;
+    int16_t last_l, last_r;
+    uint8_t ring_entry_found;
+    uint16_t ring_entry_y;
+    int16_t ring_edge_x;
 
-    near_mid = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_NEAR);
-    far_mid  = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_FAR);
-    if (near_mid < 0 || far_mid < 0) return STRAIGHT;
+    left_cnt = 0;
+    right_cnt = 0;
+    left_end_y = 0;
+    right_end_y = 0;
+    last_l = -1;
+    last_r = -1;
+    ring_entry_found = 0;
+    ring_entry_y = 0;
+    ring_edge_x = 0;
 
-    lane_w = average_lane_width((uint16_t)(MT9V034_HEIGHT - 20), (uint16_t)(MT9V034_HEIGHT - 5));
-    dx = (int16_t)(far_mid - near_mid);
-
-    left_edge_lost  = 0;
-    right_edge_lost = 0;
-
-    for (y = (uint16_t)(MT9V034_HEIGHT / 2); y < MT9V034_HEIGHT; y++)
+    /* Count valid rows for each edge, bottom to top */
+    for (y = (uint16_t)(MT9V034_HEIGHT / 3); y < MT9V034_HEIGHT; y++)
     {
-        el = g_track.left[y];
-        er = g_track.right[y];
-        if (el < 0 || el <= TRACK_EDGE_NEAR_TH) left_edge_lost++;
-        if (er < 0 || er >= (int16_t)(MT9V034_WIDTH - 1 - TRACK_EDGE_NEAR_TH)) right_edge_lost++;
+        if (g_track.left[y] > 2)
+        {
+            left_cnt++;
+            left_end_y = y;
+            last_l = g_track.left[y];
+        }
+        if (g_track.right[y] < (int16_t)(MT9V034_WIDTH - 4))
+        {
+            right_cnt++;
+            right_end_y = y;
+            last_r = g_track.right[y];
+        }
     }
 
-    if (dx > (lane_w / 6) && left_edge_lost >= TRACK_MIN_VALID_TURN_ROWS)  return RIGHT_ANGLE_l;
-    if (dx < -(lane_w / 6) && right_edge_lost >= TRACK_MIN_VALID_TURN_ROWS) return RIGHT_ANGLE_r;
+    /* Not enough asymmetry → no ring */
+    if (left_cnt >= right_cnt)
+    {
+        if (left_cnt - right_cnt < (uint16_t)RING_LEN_DIFF_TH)
+            return NONE;
+    }
+    else
+    {
+        if (right_cnt - left_cnt < (uint16_t)RING_LEN_DIFF_TH)
+            return NONE;
+    }
+
+    /* ---- Ring candidate detected ---- */
+
+    if (left_cnt < right_cnt)
+    {
+        /* RING_l: left edge shorter, ring branches off to the LEFT.
+           The right boundary continues past where left ends.
+           Scan the right boundary above left_end_y for inward shift
+           (the ring's inner edge appears as a leftward jump). */
+        ring_entry_found = 0;
+        last_r = g_track.right[left_end_y];
+
+        for (y = left_end_y; y > (uint16_t)(MT9V034_HEIGHT / 3); y--)
+        {
+            if (g_track.right[y] < (int16_t)(MT9V034_WIDTH - 4))
+            {
+                /* Right edge shifted inward significantly → ring corner */
+                if (last_r > 0 && g_track.right[y] - last_r > (int16_t)RING_EDGE_SHIFT)
+                {
+                    ring_entry_found = 1;
+                    ring_entry_y = y;
+                    ring_edge_x = g_track.right[y];
+                    break;
+                }
+                last_r = g_track.right[y];
+            }
+        }
+
+        if (ring_entry_found)
+        {
+            /* TODO: binary image scan from (ring_edge_x, ring_entry_y)
+               leftward to find the inner ring boundary's left edge.
+               For now, return RING_l based on edge-length asymmetry +
+               inward shift of the right boundary. */
+            return RING_l;
+        }
+        /* Edge-length diff without inward shift → possible false trigger.
+           Still return RING_l so caller can decide. */
+        return RING_l;
+    }
+    else
+    {
+        /* RING_r: right edge shorter, ring branches off to the RIGHT.
+           Mirror of RING_l above. */
+        ring_entry_found = 0;
+        last_l = g_track.left[right_end_y];
+
+        for (y = right_end_y; y > (uint16_t)(MT9V034_HEIGHT / 3); y--)
+        {
+            if (g_track.left[y] > 2)
+            {
+                /* Left edge shifted inward significantly → ring corner */
+                if (last_l > 0 && last_l - g_track.left[y] > (int16_t)RING_EDGE_SHIFT)
+                {
+                    ring_entry_found = 1;
+                    ring_entry_y = y;
+                    ring_edge_x = g_track.left[y];
+                    break;
+                }
+                last_l = g_track.left[y];
+            }
+        }
+
+        if (ring_entry_found)
+            return RING_r;
+        return RING_r;
+    }
+}
+/* ================================================================
+ * Qr-inspired segment-based element detection
+ *
+ * Uses boundary arrays at two key rows.  Real tracked edges are
+ * L_Border >= 3 (tracked min = BORDER_MIN+2) and
+ * R_Border <= 184 (tracked max = BORDER_MAX-2).  Default fill
+ * values (1 / 186) mean no tracking data at that row.
+ * ================================================================ */
+static TRACK_ELEMENT detect_element_segment(void)
+{
+    int16_t l_near, r_near, l_far, r_far;
+    int16_t w_near, w_far;
+    int16_t c_near, c_far, dx;
+    uint16_t near_y, far_y;
+    uint8_t near_left_ok, near_right_ok;
+    uint8_t far_left_ok, far_right_ok;
+
+    near_y = (uint16_t)(MT9V034_HEIGHT - 20);
+    far_y = (uint16_t)VISION_LOOKAHEAD_Y;
+
+    l_near = g_track.left[near_y];
+    r_near = g_track.right[near_y];
+    l_far = g_track.left[far_y];
+    r_far = g_track.right[far_y];
+
+    if (l_near < 0 || r_near < 0 || l_far < 0 || r_far < 0)
+        return BROKEN;
+
+    /* Real data: L > 2 (min tracked = 3), R < 185 (max tracked = 184) */
+    near_left_ok = (l_near > 2) ? 1 : 0;
+    near_right_ok = (r_near < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
+    far_left_ok = (l_far > 2) ? 1 : 0;
+    far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
+
+    /* Near row has no real data → truly lost */
+    if (!near_left_ok && !near_right_ok)
+        return BROKEN;
+
+    w_near = r_near - l_near + 1;
+    w_far = r_far - l_far + 1;
+
+    /* CROSS: track very wide at both rows, both edges tracked */
+    if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
+    {
+        if (w_near > (int16_t)(MT9V034_WIDTH * 3 / 4) && w_far > (int16_t)(MT9V034_WIDTH * 3 / 4))
+            return CROSS;
+    }
+
+    if (near_left_ok && near_right_ok)
+    {
+        /* Edge-loss turn: one edge at border — sharp turn / right angle */
+        if (far_left_ok && !far_right_ok)
+        {
+            if (l_far > 15 && w_far > 15 && w_far < (int16_t)(MT9V034_WIDTH * 8 / 9))
+                return RIGHT_ANGLE_r;
+        }
+
+        if (!far_left_ok && far_right_ok)
+        {
+            if (r_far < (int16_t)(MT9V034_WIDTH - 15) && w_far > 15 && w_far < (int16_t)(MT9V034_WIDTH * 8 / 9))
+                return RIGHT_ANGLE_l;
+        }
+
+        /* Smooth curve: both edges tracked, midline shifts at far row */
+        if (far_left_ok && far_right_ok)
+        {
+            c_near = (l_near + r_near) / 2;
+            c_far = (l_far + r_far) / 2;
+            dx = c_far - c_near;
+
+            /* TODO: 弯道检测灵敏度, 越小越早触发 (3~8) */
+            if (dx > 4)
+                return RIGHT_ANGLE_r;
+            if (dx < -4)
+                return RIGHT_ANGLE_l;
+        }
+    }
 
     return STRAIGHT;
 }
@@ -397,13 +624,31 @@ static TRACK_ELEMENT detect_turn_scene(void)
  * ================================================================ */
 TRACK_ELEMENT track_element_judge(void)
 {
-    if (!g_track_valid) return NONE;
+    TRACK_ELEMENT seg_elem;
 
-    if (g_track.feature == VISION_FEATURE_LOST)       return BROKEN;
-    if (g_track.feature == VISION_FEATURE_RING_LEFT)  return RING_l;
-    if (g_track.feature == VISION_FEATURE_RING_RIGHT) return RING_r;
-    if (g_track.feature == VISION_FEATURE_CROSS || detect_cross_scene()) return CROSS;
-    return detect_turn_scene();
+    if (!g_track_valid)
+        return NONE;
+
+    /* Vision-layer feature flags (from Cross_Fill / ring detection) */
+    if (g_track.feature == VISION_FEATURE_LOST)
+        return BROKEN;
+    if (g_track.feature == VISION_FEATURE_RING_LEFT)
+        return RING_l;
+    if (g_track.feature == VISION_FEATURE_RING_RIGHT)
+        return RING_r;
+    /* TODO: 接入detect_ring() — 目前vision层不设置RING feature,
+       需要确认二值化图像可访问后, 在detect_ring()中完成横向扫描拐点检测 */
+
+    /* Qr-inspired segment-based classification (primary) */
+    seg_elem = detect_element_segment();
+    if (seg_elem != STRAIGHT)
+        return seg_elem;
+
+    /* Fallback: legacy width-based cross check */
+    if (g_track.feature == VISION_FEATURE_CROSS || detect_cross_scene())
+        return CROSS;
+
+    return STRAIGHT;
 }
 
 /* ================================================================
@@ -414,49 +659,83 @@ static uint8_t plan_straight_center(void)
     int16_t near_mid, far_mid, target;
 
     near_mid = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_NEAR);
-    far_mid  = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_FAR);
+    far_mid = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_FAR);
     if (near_mid >= 0 && far_mid >= 0)
     {
         target = (int16_t)((near_mid + far_mid * 2) / 3);
         return clamp_center_to_target(target);
     }
-    if (g_track.center_x >= 0) return clamp_center_to_target(g_track.center_x);
+    if (g_track.center_x >= 0)
+        return clamp_center_to_target(g_track.center_x);
     return track_midpoint_target_P;
 }
-
 static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
 {
-    int16_t lane_w;
-    int16_t y_ref;
+    int16_t l_far, r_far;
     int16_t target;
+    int16_t lane_w;
+    int16_t near_y;
+    uint16_t far_y;
+    uint8_t far_left_ok, far_right_ok;
 
-    lane_w = average_lane_width((uint16_t)(MT9V034_HEIGHT - 20), (uint16_t)(MT9V034_HEIGHT - 5));
-    if (lane_w < 20) lane_w = 20;
-    target = -1;
+    (void)turn_type;
 
-    for (y_ref = (int16_t)(MT9V034_HEIGHT - 15); y_ref >= (int16_t)(MT9V034_HEIGHT / 3); y_ref--)
+    far_y = (uint16_t)VISION_LOOKAHEAD_Y;
+    l_far = g_track.left[far_y];
+    r_far = g_track.right[far_y];
+
+    far_left_ok  = (l_far > 2) ? 1 : 0;
+    far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
+
+    /* 双边丢线: 保持上一帧目标 */
+    if (!far_left_ok && !far_right_ok)
     {
-        if (turn_type == RIGHT_ANGLE_l)
+        return track_midpoint_target_P;
+    }
+
+    /* 从近行取道宽 */
+    near_y = (int16_t)(MT9V034_HEIGHT - 18);
+    {
+        int16_t l_near, r_near;
+        l_near = g_track.left[near_y];
+        r_near = g_track.right[near_y];
+        if (l_near > 2 && r_near < (int16_t)(MT9V034_WIDTH - 4))
         {
-            if (g_track.right[(uint16_t)y_ref] >= 0)
-            {
-                target = g_track.right[(uint16_t)y_ref] - lane_w / 2 - TRACK_TURN_SHIFT / 2;
-                break;
-            }
+            lane_w = r_near - l_near + 1;
         }
         else
         {
-            if (g_track.left[(uint16_t)y_ref] >= 0)
-            {
-                target = g_track.left[(uint16_t)y_ref] + lane_w / 2 + TRACK_TURN_SHIFT / 2;
-                break;
-            }
+            lane_w = 65;
         }
     }
+    /* TODO: 道宽范围, 根据实际赛道在图像中的像素宽调整 (兜底值=65) */
+    if (lane_w < 25) lane_w = 65;
+    if (lane_w > 160) lane_w = 160;
 
-    if (target < 0) target = g_track.center_x;
+    /* 十字路口: 双边都在边界 → 保持中心 */
+    if (l_far <= 5 && r_far >= (int16_t)(MT9V034_WIDTH - 5))
+    {
+        target = CENTER_POINT;
+    }
+    /* 双边可见: 标准 (L+R)/2 */
+    else if (far_left_ok && far_right_ok)
+    {
+        target = (l_far + r_far) / 2;
+    }
+    /* 右边界丢线: 道路中心 = 左边界 + 半道宽 */
+    else if (far_left_ok && !far_right_ok)
+    {
+        target = l_far + lane_w / 2;
+    }
+    /* 左边界丢线: 道路中心 = 右边界 - 半道宽 */
+    else /* !far_left_ok && far_right_ok */
+    {
+        target = r_far - lane_w / 2;
+    }
+
     return clamp_center_to_target(target);
 }
+
 
 /* ================================================================
  * Pure Pursuit target planning (new mode)
@@ -467,8 +746,10 @@ static void plan_pure_pursuit(float current_speed)
     float lp;
 
     lp = (current_speed > 5.0f) ? (current_speed / (float)PP_LOOKAHEAD_SCALE) : (float)PP_LOOKAHEAD_MIN;
-    if (lp < (float)PP_LOOKAHEAD_MIN) lp = (float)PP_LOOKAHEAD_MIN;
-    if (lp > (float)PP_LOOKAHEAD_MAX) lp = (float)PP_LOOKAHEAD_MAX;
+    if (lp < (float)PP_LOOKAHEAD_MIN)
+        lp = (float)PP_LOOKAHEAD_MIN;
+    if (lp > (float)PP_LOOKAHEAD_MAX)
+        lp = (float)PP_LOOKAHEAD_MAX;
 
     pp_lookahead_dist = lp;
     pp_steering_angle = pure_pursuit_angle(&g_track, lp);
@@ -506,7 +787,7 @@ static void vofa_send_firewater(void)
     fvals[6] = (float)g_track.left_bev_step;
     fvals[7] = (float)g_track.right_bev_step;
     fvals[8] = (float)g_track.mid_step;
-    fvals[9] = (float)g_track.feature;
+    fvals[9] = (float)track_element;
 
     for (i = 0; i < VOFA_FLOAT_COUNT; i++)
     {
@@ -538,7 +819,8 @@ static void report_track_element_if_changed(void)
  * ================================================================ */
 static void trail_fsm_on_entry(TRACK_ELEMENT state)
 {
-    if (state == BROKEN_RODE)
+    /* 锁定航向: 直道保持姿态, 断桥保持冲出方向 */
+    if (state == STRAIGHT || state == BROKEN_RODE)
     {
         gyro_target = yaw;
     }
@@ -546,8 +828,12 @@ static void trail_fsm_on_entry(TRACK_ELEMENT state)
     {
         g_track_fsm.state_hold = 3;
     }
-    if (state == STRAIGHT || state == RIGHT_ANGLE_l || state == RIGHT_ANGLE_r ||
-        state == RING_l || state == RING_r || state == RING_c)
+    /* TODO: 防切回保护帧数, 配合debounce. 切回太快→加大(8~12), 出弯太慢→减小(3~5) */
+    if (state == RIGHT_ANGLE_l || state == RIGHT_ANGLE_r)
+    {
+        g_track_fsm.state_hold = 6;
+    }
+    if (state == STRAIGHT || state == RING_l || state == RING_r || state == RING_c)
     {
         broken_flag_clear();
     }
@@ -583,10 +869,7 @@ void track_handle(void)
     vision_poll_track();
     if (!g_track_valid)
     {
-        g_track_fsm.state        = NONE;
-        g_track_fsm.pending      = NONE;
-        g_track_fsm.debounce_cnt = 0;
-        track_element   = NONE;
+        track_element = NONE;
         current_element = NONE;
         return;
     }
@@ -640,7 +923,8 @@ void track_handle(void)
     /* PLAN_HOLD and PLAN_BROKEN: keep previous target */
 
     // Post-processing: jump limiter + per-state EMA
-    if (track_element != BROKEN_RODE && track_element != NONE)
+    if (track_element != BROKEN_RODE && track_element != NONE &&
+        track_element != RIGHT_ANGLE_l && track_element != RIGHT_ANGLE_r)
     {
         jump = (int16_t)new_target - (int16_t)track_midpoint_target_P;
         if (jump > 12)

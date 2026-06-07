@@ -8,6 +8,7 @@
 - **IMU**: ICM42686 通过 SPI_2 (P02=CS, P03=MOSI, P04=MISO, P05=SCLK, 10MHz Mode 0)
 - **舵机**: 转向, 范围 [70,110], 映射: `servo = 90 + wheel_angle × 2.0`, 限制 ±10°
 - **构建**: Keil 工程 `KYPROJECT`
+- **语言**: 所有注释、提交信息、文档一律用中文
 
 ## 架构 — 3 层循迹管线
 
@@ -79,7 +80,6 @@ vision_track.c  →  trail.c  →  control.c
 | MT9V034_WIDTH / HEIGHT | 188 / 120 | vision_track.h |
 | CENTER_POINT | 94 | trail.h |
 | VISION_LOOKAHEAD_Y | HEIGHT-35 = 85 | vision_track.h |
-| TRACK_TURN_SHIFT | 28 | trail.c:8 |
 | STEER_OUTPUT_LIMIT | 20.0f | control.h |
 | FIXED_PWM_DUTY | 600 | control.c:11 |
 | CASCADE_PID | 2 (默认) | pid.h:5 |
@@ -123,7 +123,7 @@ vision_track.c  →  trail.c  →  control.c
 ### Trail / 元素分类
 
 - `plan_straight_center` 权重: `(near_mid + far_mid * 2) / 3` — 偏好远点 (67%) 使循迹更平滑
-- `plan_turn_center`: 向弯道内侧偏移 `TRACK_TURN_SHIFT/2` (14px) + `lane_w/2`
+- `plan_turn_center`: 道路中心估计 — 双边可见→(L+R)/2, 单边丢线(非十字)→可见边±半道宽, 十字→CENTER_POINT
 - 十字检测: `base_w` 从底部行 (HEIGHT-25 到 HEIGHT-5) 计算, 非中间行。阈值: `w > base_w + base_w/3`
 - 弯道检测: `dx > lane_w/6` (原 lane_w/5), 需要 ≥9 行丢边
 
