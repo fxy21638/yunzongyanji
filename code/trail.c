@@ -418,9 +418,9 @@ static uint8_t detect_cross_scene(void)
  * TODO: integrate into track_element_judge() and FSM once corner
  *       detection is validated on real track images.
  * ================================================================ */
-#define RING_LEN_DIFF_TH  40   /* TODO: min edge-length diff for ring (pixels) */
-#define RING_GAP_STREAK    5   /* TODO: consecutive rows to confirm ring gap */
-#define RING_EDGE_SHIFT   25   /* TODO: edge position shift at ring entry */
+#define RING_LEN_DIFF_TH  40   /* TODO: 环岛最小边数差 (像素) */
+#define RING_GAP_STREAK    5   /* TODO: 环岛缺口连续行数 */
+#define RING_EDGE_SHIFT   25   /* TODO: 环岛入口边界偏移阈值 */
 
 static TRACK_ELEMENT detect_ring(void)
 {
@@ -442,7 +442,7 @@ static TRACK_ELEMENT detect_ring(void)
     ring_entry_y = 0;
     ring_edge_x = 0;
 
-    /* Count valid rows for each edge, bottom to top */
+    /* 从底向上统计每边有效行数 */
     for (y = (uint16_t)(MT9V034_HEIGHT / 3); y < MT9V034_HEIGHT; y++)
     {
         if (g_track.left[y] > 2)
@@ -459,7 +459,7 @@ static TRACK_ELEMENT detect_ring(void)
         }
     }
 
-    /* Not enough asymmetry → no ring */
+    /* 边数差不够 → 非环岛 */
     if (left_cnt >= right_cnt)
     {
         if (left_cnt - right_cnt < (uint16_t)RING_LEN_DIFF_TH)
@@ -471,14 +471,14 @@ static TRACK_ELEMENT detect_ring(void)
             return NONE;
     }
 
-    /* ---- Ring candidate detected ---- */
+    /* ---- 环岛候选 ---- */
 
     if (left_cnt < right_cnt)
     {
-        /* RING_l: left edge shorter, ring branches off to the LEFT.
-           The right boundary continues past where left ends.
-           Scan the right boundary above left_end_y for inward shift
-           (the ring's inner edge appears as a leftward jump). */
+        /* RING_l: 左边界短, 环岛向左分叉.
+           右边界在左边界结束后继续延伸.
+           在 left_end_y 上方扫描右边界内移
+           (环岛内边界表现为向左跳跃). */
         ring_entry_found = 0;
         last_r = g_track.right[left_end_y];
 
@@ -486,7 +486,7 @@ static TRACK_ELEMENT detect_ring(void)
         {
             if (g_track.right[y] < (int16_t)(MT9V034_WIDTH - 4))
             {
-                /* Right edge shifted inward significantly → ring corner */
+                /* 右边界显著内移 → 环岛拐角 */
                 if (last_r > 0 && g_track.right[y] - last_r > (int16_t)RING_EDGE_SHIFT)
                 {
                     ring_entry_found = 1;
@@ -500,20 +500,17 @@ static TRACK_ELEMENT detect_ring(void)
 
         if (ring_entry_found)
         {
-            /* TODO: binary image scan from (ring_edge_x, ring_entry_y)
-               leftward to find the inner ring boundary's left edge.
-               For now, return RING_l based on edge-length asymmetry +
-               inward shift of the right boundary. */
+            /* TODO: 从 (ring_edge_x, ring_entry_y) 向左扫描二值图,
+               寻找环岛内边界的左边缘.
+               当前基于边数差+右边界内移返回 RING_l. */
             return RING_l;
         }
-        /* Edge-length diff without inward shift → possible false trigger.
-           Still return RING_l so caller can decide. */
+        /* 边数差满足但无内移 → 可能误触发, 仍返回 RING_l 让调用方决策. */
         return RING_l;
     }
     else
     {
-        /* RING_r: right edge shorter, ring branches off to the RIGHT.
-           Mirror of RING_l above. */
+        /* RING_r: 右边界短, 环岛向右分叉. 与 RING_l 镜像. */
         ring_entry_found = 0;
         last_l = g_track.left[right_end_y];
 
@@ -521,7 +518,7 @@ static TRACK_ELEMENT detect_ring(void)
         {
             if (g_track.left[y] > 2)
             {
-                /* Left edge shifted inward significantly → ring corner */
+                /* 左边界显著内移 → 环岛拐角 */
                 if (last_l > 0 && last_l - g_track.left[y] > (int16_t)RING_EDGE_SHIFT)
                 {
                     ring_entry_found = 1;
@@ -566,20 +563,20 @@ static TRACK_ELEMENT detect_element_segment(void)
     if (l_near < 0 || r_near < 0 || l_far < 0 || r_far < 0)
         return BROKEN;
 
-    /* Real data: L > 2 (min tracked = 3), R < 185 (max tracked = 184) */
+    /* 真实数据: L > 2 (最小追踪值=3), R < 185 (最大追踪值=184) */
     near_left_ok = (l_near > 2) ? 1 : 0;
     near_right_ok = (r_near < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
     far_left_ok = (l_far > 2) ? 1 : 0;
     far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
 
-    /* Near row has no real data → truly lost */
+    /* 近行无真实数据 → 彻底丢线 */
     if (!near_left_ok && !near_right_ok)
         return BROKEN;
 
     w_near = r_near - l_near + 1;
     w_far = r_far - l_far + 1;
 
-    /* CROSS: track very wide at both rows, both edges tracked */
+    /* 十字: 两行很宽且双边可追踪 */
     if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
     {
         if (w_near > (int16_t)(MT9V034_WIDTH * 3 / 4) && w_far > (int16_t)(MT9V034_WIDTH * 3 / 4))
@@ -588,7 +585,7 @@ static TRACK_ELEMENT detect_element_segment(void)
 
     if (near_left_ok && near_right_ok)
     {
-        /* Edge-loss turn: one edge at border — sharp turn / right angle */
+        /* 丢边弯道: 一边触边界 — 直角弯 */
         if (far_left_ok && !far_right_ok)
         {
             if (l_far > 15 && w_far > 15 && w_far < (int16_t)(MT9V034_WIDTH * 8 / 9))
@@ -601,7 +598,7 @@ static TRACK_ELEMENT detect_element_segment(void)
                 return RIGHT_ANGLE_l;
         }
 
-        /* Smooth curve: both edges tracked, midline shifts at far row */
+        /* 平滑弯道: 双边可追踪, 远行中线偏移 */
         if (far_left_ok && far_right_ok)
         {
             c_near = (l_near + r_near) / 2;
@@ -629,7 +626,7 @@ TRACK_ELEMENT track_element_judge(void)
     if (!g_track_valid)
         return NONE;
 
-    /* Vision-layer feature flags (from Cross_Fill / ring detection) */
+    /* 视觉层特征标志 (来自 Cross_Fill / 环岛检测) */
     if (g_track.feature == VISION_FEATURE_LOST)
         return BROKEN;
     if (g_track.feature == VISION_FEATURE_RING_LEFT)
@@ -639,12 +636,12 @@ TRACK_ELEMENT track_element_judge(void)
     /* TODO: 接入detect_ring() — 目前vision层不设置RING feature,
        需要确认二值化图像可访问后, 在detect_ring()中完成横向扫描拐点检测 */
 
-    /* Qr-inspired segment-based classification (primary) */
+    /* 基于分段的中点偏移分类 (主要) */
     seg_elem = detect_element_segment();
     if (seg_elem != STRAIGHT)
         return seg_elem;
 
-    /* Fallback: legacy width-based cross check */
+    /* 回退: 宽度法十字检测 */
     if (g_track.feature == VISION_FEATURE_CROSS || detect_cross_scene())
         return CROSS;
 
@@ -920,7 +917,7 @@ void track_handle(void)
         else
             new_target = CENTER_POINT;
     }
-    /* PLAN_HOLD and PLAN_BROKEN: keep previous target */
+    /* PLAN_HOLD 和 PLAN_BROKEN: 保持上一帧目标 */
 
     // Post-processing: jump limiter + per-state EMA
     if (track_element != BROKEN_RODE && track_element != NONE &&

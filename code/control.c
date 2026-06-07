@@ -274,7 +274,7 @@ void steering_control(void)
         fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
         fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
 
-        /* Image-based track angle: midline shift near→far */
+        /* 图像赛道方向: 中线近远偏移 */
         {
             int16_t l_near, r_near;
             int16_t l_far, r_far;
@@ -303,12 +303,12 @@ void steering_control(void)
         }
 
 #if (CASCADE_PID == 1)
-        /* Position PID */
+        /* 位置 PID */
         pid_pos.Kp = fsm_Kp;
         pid_pos.Kd = fsm_Kd;
         pos_out = PositionalPID_Calculate(&pid_pos, track_error);
 
-        /* Angle PID: if track veers right (dx>0), steer right (-dx<0) */
+        /* 角度 PID: 赛道右偏(dx>0) → 右转(-dx<0) */
         pid_gyro.Kp = ANGLE_BLEND_KP;
         pid_gyro.Kd = ANGLE_BLEND_KD;
         ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
