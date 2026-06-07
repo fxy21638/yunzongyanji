@@ -2,9 +2,10 @@
 #include "vision_master.h"
 #include "vision_track.h"
 #include "wireless_vision.h"
+#include "trail.h"
 
 // 图像发送总开关: 0=跑车模式(不发图), 1=调试模式(发图)
-#define VOFA_IMAGE_ENABLE 0
+#define VOFA_IMAGE_ENABLE 1
 // 无线图像输出: 0=仅USB, 1=USB+无线
 #define WIRELESS_IMAGE_OUTPUT 0
 // 图像发送跳帧: 每 N 帧发一次图
@@ -742,8 +743,18 @@ static void draw_per_row_mid_overlay(uint8_t *out, const vision_track_result_t *
 	for (y = 0; y < MT9V034_HEIGHT; y++)
 	{
 		int16_t m;
+		int16_t lb;
+		int16_t rb;
+
 		m = track->mid[(uint16_t)y];
-		if (m >= 0 && m < (int16_t)MT9V034_WIDTH)
+		if (m < 0 || m >= (int16_t)MT9V034_WIDTH)
+			continue;
+
+		lb = track->left[y];
+		rb = track->right[y];
+		if (lb >= 0 && rb >= 0 && (m < lb || m > rb))
+			continue;
+
 		{
 			// Draw 3-pixel bar
 			overlay_pixel(out, m, (int16_t)y, 0);
@@ -769,10 +780,6 @@ static void draw_per_row_mid_overlay(uint8_t *out, const vision_track_result_t *
 			}
 			prev_valid = m;
 			has_prev = 1;
-		}
-		else
-		{
-			has_prev = 0;
 		}
 	}
 }
@@ -801,6 +808,77 @@ static void draw_current_center_overlay(uint8_t *out, const vision_track_result_
 	draw_corner_cross(out, cx, cy, 0);
 }
 
+// 5×7 点阵字库 (仅数字 0-9 + 空格)
+// 每字符 5 字节, 列优先, bit0=顶部像素
+static const uint8_t s_font_5x7[11][5] =
+{
+    {0x3E, 0x51, 0x49, 0x45, 0x3E}, // 0
+    {0x00, 0x42, 0x7F, 0x40, 0x00}, // 1
+    {0x42, 0x61, 0x51, 0x49, 0x46}, // 2
+    {0x21, 0x41, 0x45, 0x4B, 0x31}, // 3
+    {0x18, 0x14, 0x12, 0x7F, 0x10}, // 4
+    {0x27, 0x45, 0x45, 0x45, 0x39}, // 5
+    {0x3C, 0x4A, 0x49, 0x49, 0x30}, // 6
+    {0x01, 0x71, 0x09, 0x05, 0x03}, // 7
+    {0x36, 0x49, 0x49, 0x49, 0x36}, // 8
+    {0x06, 0x49, 0x49, 0x29, 0x1E}, // 9
+    {0x00, 0x00, 0x00, 0x00, 0x00}, // 空格 (索引10)
+};
+
+static void font_draw_char(uint8_t *img, int16_t cx, int16_t cy, uint8_t ch, uint8_t color)
+{
+    uint8_t col;
+    int16_t row;
+    uint16_t idx;
+    int16_t px;
+    int16_t py;
+
+    if (ch > 10) return;
+
+    for (col = 0; col < 5; col++)
+    {
+        px = cx + (int16_t)col;
+        if (px < 0 || px >= (int16_t)MT9V034_WIDTH) continue;
+
+        for (row = 0; row < 7; row++)
+        {
+            py = cy + row;
+            if (py < 0 || py >= (int16_t)MT9V034_HEIGHT) continue;
+
+            if (s_font_5x7[ch][col] & (1 << row))
+            {
+                idx = (uint16_t)py * MT9V034_WIDTH + (uint16_t)px;
+                img[idx] = color;
+            }
+        }
+    }
+}
+
+static void draw_element_indicator(uint8_t *out, TRACK_ELEMENT elem)
+{
+    uint8_t tens;
+    uint8_t ones;
+    int16_t x0;
+    int16_t y0;
+
+    (void)elem;
+    x0 = (int16_t)(MT9V034_WIDTH - 20);
+    y0 = (int16_t)(MT9V034_HEIGHT - 12);
+
+    tens = (uint8_t)track_element / 10;
+    ones = (uint8_t)track_element % 10;
+
+    if (tens > 0)
+    {
+        font_draw_char(out, x0, y0, tens, 220);
+        font_draw_char(out, x0 + (int16_t)6, y0, ones, 220);
+    }
+    else
+    {
+        font_draw_char(out, x0 + (int16_t)3, y0, ones, 220);
+    }
+}
+
 static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_track_result_t *track)
 {
 	memcpy(out, gray, MT9V034_IMAGE_SIZE);
@@ -809,6 +887,7 @@ static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_t
 	draw_bev_boundaries_overlay(out, track);
 	draw_bev_midline_overlay(out, track);
 	draw_current_center_overlay(out, track);
+	draw_element_indicator(out, track_element);
 }
 
 static void render_pseudo_gray(uint8_t *out, const uint8_t *bin, const vision_track_result_t *track)

@@ -35,5 +35,5 @@ void System_Init(void)
 void debug_main(void)
 {
     track_handle();
-    //vofa_image_task();
+    vofa_image_task();
 }

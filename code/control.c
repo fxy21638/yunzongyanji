@@ -17,6 +17,14 @@ float speed_base = 65;
 // 转向: 0=像素偏差PID, 1=Pure Pursuit (需BEV数据)
 #define VISION_USE_PURE_PURSUIT 0
 
+/* TODO: 角度环融合 — 从图像中线偏移计算赛道方向, 修正车身姿态
+   ANGLE_BLEND_WEIGHT: 角度环占比 (0.15~0.35), 越大角度环越强
+   ANGLE_BLEND_KP:     角度环比例 (0.2~0.6), 输入单位=中线偏移像素
+   ANGLE_BLEND_KD:     角度环微分/阻尼 (0.3~1.0) */
+#define ANGLE_BLEND_WEIGHT 0.25f
+#define ANGLE_BLEND_KP     0.35f
+#define ANGLE_BLEND_KD     0.50f
+
 float gyro_target = 0;
 float gyro_control = 60;
 uint8_t turn_step = 0;
@@ -127,8 +135,8 @@ void steering_control(void)
     int16_t last_l, last_r;
     uint8_t emergency;
 
-#if 0
-	    // ====== Emergency recovery (disabled for tuning) ======
+#if 1
+	    // ====== Emergency recovery ======
 	    emergency = 0;
 	    steer_output = 0.0f;
 	    last_l = -1;
@@ -136,30 +144,31 @@ void steering_control(void)
 
 	    if (!g_track_valid ||
 	        g_track.feature == VISION_FEATURE_LOST ||
-	        g_track.valid_rows < 5)
+	        g_track.visible_high > (uint8_t)(MT9V034_HEIGHT - 25) ||
+	        track_element == BROKEN)
 	    {
 	        for (y = (uint16_t)(MT9V034_HEIGHT / 2); y < MT9V034_HEIGHT; y++)
 	        {
-	            if (g_track.left[y] >= 0)  last_l = g_track.left[y];
-	            if (g_track.right[y] >= 0) last_r = g_track.right[y];
+	            if (g_track.left[y] > 2)  last_l = g_track.left[y];
+	            if (g_track.right[y] < (int16_t)(MT9V034_WIDTH - 4)) last_r = g_track.right[y];
 	        }
 
 	        if (last_l >= 0 && last_r < 0)
 	        {
 	            emergency = 1;
-	            steer_output = STEER_OUTPUT_LIMIT;
+	            steer_output = -STEER_OUTPUT_LIMIT;
 	        }
 	        else if (last_r >= 0 && last_l < 0)
 	        {
 	            emergency = 2;
-	            steer_output = -STEER_OUTPUT_LIMIT;
+	            steer_output = STEER_OUTPUT_LIMIT;
 	        }
 	        else if (last_l < 0 && last_r < 0)
 	        {
 	            static int8_t last_emergency_dir = 0;
-	            if (last_emergency_dir == 0) last_emergency_dir = 1;
+	            if (last_emergency_dir == 0) last_emergency_dir = -1;
 	            emergency = 3;
-	            steer_output = (float)last_emergency_dir * STEER_OUTPUT_LIMIT * 0.5f;
+	            steer_output = (float)last_emergency_dir * STEER_OUTPUT_LIMIT * 0.25f;
 	        }
 	    }
 
@@ -258,13 +267,54 @@ void steering_control(void)
     }
     else
     {
+        float pos_out;
+        float ang_out;
+        float track_dx;
+
         fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
         fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
 
+        /* Image-based track angle: midline shift near→far */
+        {
+            int16_t l_near, r_near;
+            int16_t l_far, r_far;
+            int16_t c_near, c_far;
+            uint16_t ny, fy;
+
+            ny = (uint16_t)(MT9V034_HEIGHT - 20);
+            fy = (uint16_t)VISION_LOOKAHEAD_Y;
+
+            l_near = g_track.left[ny];
+            r_near = g_track.right[ny];
+            l_far  = g_track.left[fy];
+            r_far  = g_track.right[fy];
+
+            if (l_near > 2 && r_near < (int16_t)(MT9V034_WIDTH - 4) &&
+                l_far  > 2 && r_far  < (int16_t)(MT9V034_WIDTH - 4))
+            {
+                c_near = (l_near + r_near) / 2;
+                c_far  = (l_far + r_far) / 2;
+                track_dx = (float)(c_far - c_near);
+            }
+            else
+            {
+                track_dx = 0.0f;
+            }
+        }
+
 #if (CASCADE_PID == 1)
+        /* Position PID */
         pid_pos.Kp = fsm_Kp;
         pid_pos.Kd = fsm_Kd;
-        steer_output = PositionalPID_Calculate(&pid_pos, track_error);
+        pos_out = PositionalPID_Calculate(&pid_pos, track_error);
+
+        /* Angle PID: if track veers right (dx>0), steer right (-dx<0) */
+        pid_gyro.Kp = ANGLE_BLEND_KP;
+        pid_gyro.Kd = ANGLE_BLEND_KD;
+        ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
+
+        steer_output = pos_out * (1.0f - ANGLE_BLEND_WEIGHT)
+                     + ang_out * ANGLE_BLEND_WEIGHT;
 #else
         angle_pid.KP  = fsm_Kp;
         angle_pid.KD  = fsm_Kd;
