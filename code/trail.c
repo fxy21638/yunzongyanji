@@ -464,29 +464,35 @@ static uint8_t detect_cross_scene(void)
 /* ================================================================
  * 第 7 节 — 环岛检测 (逐行边界突变扫描)
  *
- * scan_ring_jump() 从近到远逐行扫描, 找一侧边界突然大幅跳变,
+ * scan_ring_jump() 从近到远逐行扫描, 找一侧边界突然大幅跳变("刺入"),
  * 同时另一侧保持稳定, 跳变上方仍有路(中线居中)确认岛后通路。
  * 以此区分环岛(跳变后有路)和普通转弯/断头路(跳变后没路)。
  *
  * 检测逻辑:
- *   1. 近处积累稳定直道段: |dl|<3 且 |dr|<3 连续 ≥5 行
- *   2. 稳定段后检测单侧跳变: dl<-10(左) 或 dr>+10(右), 对侧 |变化|<3
- *   3. 跳变上方验证有路: ≥3 行双边可见 + 中线在中心 ±25px 内
+ *   0. 从近行找第一个双边可见行 (允许近行丢线, 向上搜索最多 8 行)
+ *   1. 积累稳定直道段: |dl|<3 且 |dr|<3 连续 >=5 行
+ *   2. 检测单侧跳变: dl<-10(左) 或 dr>+10(右), 对侧 |变化|<3
+ *      - 双边→单边丢线也算跳变 (环岛入口特征: 一侧边界突然刺入画面边缘)
+ *   3. 跳变上方验证有路: >=3 行道路可见 + 中线估计在中心 +-25px 内
+ *      - 允许单侧可见 (环岛入口上方只有一侧边界可见, 用半道宽估计中线)
  *
  * detect_ring()      — 有跳变 + 跳变后有路 → 返回 RING_l / RING_r
  * detect_ring_exit() — 无跳变 → 鼓出消失 → 返回 1 (出环岛)
  * ================================================================ */
-#define RING_SUDDEN_TH      10   /* 边界突变阈值: |dl/dr|>10 认为跳变 */
+#define RING_SUDDEN_TH      10   /* 边界突变下限: |dl/dr|>10 认为跳变 */
+#define RING_SUDDEN_MAX     40   /* 边界突变上限: |dl/dr|>40 视为追踪伪影 */
 #define RING_STABLE_TH       3   /* 稳定段 dl/dr 上限: |dl/dr|<3 认为平滑 */
 #define RING_STABLE_MIN      5   /* 突变前最少稳定行数 */
 #define RING_ROAD_AHEAD_MIN  3   /* 突变后最少有路行数 */
 #define RING_SCAN_Y_NEAR     (MT9V034_HEIGHT - 8)    /* 扫描起点(近行) 112 */
 #define RING_SCAN_Y_FAR      (MT9V034_HEIGHT / 5)    /* 扫描终点(远行) 24 */
+#define RING_NEAR_SEARCH     8   /* 近行丢线时向上搜索双边行的最大行数 */
 
 /* 逐行扫描找边界突变, 返回 0=无突变 1=左环岛 2=右环岛 */
 static uint8_t scan_ring_jump(void)
 {
     uint16_t y;
+    uint16_t start_y;
     int16_t l_prev, r_prev, l_cur, r_cur;
     int16_t dl, dr;
     uint8_t stable_cnt;
@@ -494,37 +500,82 @@ static uint8_t scan_ring_jump(void)
     uint16_t jump_y;
     uint8_t road_cnt;
     int16_t center;
+    uint8_t found;
+    uint8_t left_lost, right_lost;
 
-    /* 近行数据无效 → 无法判断 */
-    l_prev = g_track.left[(uint16_t)RING_SCAN_Y_NEAR];
-    r_prev = g_track.right[(uint16_t)RING_SCAN_Y_NEAR];
+    /* 0. 找第一个双边可见行 */
+    start_y = (uint16_t)RING_SCAN_Y_NEAR;
+    l_prev = g_track.left[start_y];
+    r_prev = g_track.right[start_y];
     if (l_prev <= 2 || r_prev >= (int16_t)(MT9V034_WIDTH - 4))
-        return 0;
+    {
+        found = 0;
+        for (y = (uint16_t)(RING_SCAN_Y_NEAR - 1);
+             y > (uint16_t)(RING_SCAN_Y_NEAR - RING_NEAR_SEARCH); y--)
+        {
+            l_cur = g_track.left[y];
+            r_cur = g_track.right[y];
+            if (l_cur > 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
+            {
+                start_y = y;
+                l_prev = l_cur;
+                r_prev = r_cur;
+                found = 1;
+                break;
+            }
+        }
+        if (!found)
+            return 0;
+    }
 
     stable_cnt = 0;
     jump_side = 0;
     jump_y = 0;
 
-    for (y = (uint16_t)(RING_SCAN_Y_NEAR - 1); y > (uint16_t)RING_SCAN_Y_FAR; y--)
+    for (y = start_y - 1; y > (uint16_t)RING_SCAN_Y_FAR; y--)
     {
         l_cur = g_track.left[y];
         r_cur = g_track.right[y];
+        dl = l_cur - l_prev;
+        dr = r_cur - r_prev;
 
-        /* 丢线行跳过, 重置稳定计数 */
-        if (l_cur <= 2 || r_cur >= (int16_t)(MT9V034_WIDTH - 4))
+        left_lost  = (l_cur <= 2) ? 1 : 0;
+        right_lost = (r_cur >= (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
+
+        if (left_lost || right_lost)
         {
+            /* 单侧丢线 — 可能是环岛跳变 (边界突然刺入画面) */
+            if (stable_cnt >= RING_STABLE_MIN && jump_side == 0)
+            {
+                if (left_lost && !right_lost)
+                {
+                    if (dl < -(int16_t)RING_SUDDEN_TH &&
+                        dr > -(int16_t)RING_STABLE_TH && dr < (int16_t)RING_STABLE_TH)
+                    {
+                        jump_side = 1;  /* 左边界跳变 → 左环岛 */
+                        jump_y = y;
+                    }
+                }
+                else if (right_lost && !left_lost)
+                {
+                    if (dr > (int16_t)RING_SUDDEN_TH &&
+                        dl > -(int16_t)RING_STABLE_TH && dl < (int16_t)RING_STABLE_TH)
+                    {
+                        jump_side = 2;  /* 右边界跳变 → 右环岛 */
+                        jump_y = y;
+                    }
+                }
+            }
+
             stable_cnt = 0;
             l_prev = l_cur;
             r_prev = r_cur;
             continue;
         }
 
-        dl = l_cur - l_prev;  /* 从下行到上行, 左边界变化量 */
-        dr = r_cur - r_prev;  /* 从下行到上行, 右边界变化量 */
-
+        /* 双边可见行 */
         if (jump_side == 0)
         {
-            /* 还没找到突变: 先积累稳定段, 再找跳变点 */
             if (dl > -(int16_t)RING_STABLE_TH && dl < (int16_t)RING_STABLE_TH &&
                 dr > -(int16_t)RING_STABLE_TH && dr < (int16_t)RING_STABLE_TH)
             {
@@ -532,14 +583,14 @@ static uint8_t scan_ring_jump(void)
             }
             else if (stable_cnt >= RING_STABLE_MIN)
             {
-                /* 稳定段后出现跳变 → 判断方向 */
-                if (dl < -(int16_t)RING_SUDDEN_TH &&
+                /* 稳定段后在双边范围内出现跳变 (带上限防追踪伪影) */
+                if (dl < -(int16_t)RING_SUDDEN_TH && dl > -(int16_t)RING_SUDDEN_MAX &&
                     dr > -(int16_t)RING_STABLE_TH && dr < (int16_t)RING_STABLE_TH)
                 {
                     jump_side = 1;  /* 左边界向外跳 → 左环岛 */
                     jump_y = y;
                 }
-                else if (dr > (int16_t)RING_SUDDEN_TH &&
+                else if (dr > (int16_t)RING_SUDDEN_TH && dr < (int16_t)RING_SUDDEN_MAX &&
                          dl > -(int16_t)RING_STABLE_TH && dl < (int16_t)RING_STABLE_TH)
                 {
                     jump_side = 2;  /* 右边界向外跳 → 右环岛 */
@@ -547,7 +598,6 @@ static uint8_t scan_ring_jump(void)
                 }
                 else
                 {
-                    /* 两侧同时大幅变化 → 非环岛(可能是路口), 重置 */
                     stable_cnt = 0;
                 }
             }
@@ -564,7 +614,7 @@ static uint8_t scan_ring_jump(void)
     if (jump_side == 0)
         return 0;
 
-    /* 检查跳变上方是否有路: 双边可见 + 中线居中 → 环岛特征 */
+    /* 2. 检查跳变上方是否有路 (允许单侧可见 — 环岛入口特征) */
     road_cnt = 0;
     for (y = jump_y; y > (uint16_t)RING_SCAN_Y_FAR && y > 0; y--)
     {
@@ -573,6 +623,28 @@ static uint8_t scan_ring_jump(void)
         if (l_cur > 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
         {
             center = (l_cur + r_cur) / 2;
+            if (center > (int16_t)(CENTER_POINT - 25) && center < (int16_t)(CENTER_POINT + 25))
+            {
+                road_cnt++;
+                if (road_cnt >= RING_ROAD_AHEAD_MIN)
+                    return jump_side;
+            }
+        }
+        else if (l_cur > 2 && r_cur >= (int16_t)(MT9V034_WIDTH - 4))
+        {
+            /* 只有左边界 — 估计中线=左边界+半道宽(~30) */
+            center = l_cur + 30;
+            if (center > (int16_t)(CENTER_POINT - 25) && center < (int16_t)(CENTER_POINT + 25))
+            {
+                road_cnt++;
+                if (road_cnt >= RING_ROAD_AHEAD_MIN)
+                    return jump_side;
+            }
+        }
+        else if (l_cur <= 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
+        {
+            /* 只有右边界 — 估计中线=右边界-半道宽(~30) */
+            center = r_cur - 30;
             if (center > (int16_t)(CENTER_POINT - 25) && center < (int16_t)(CENTER_POINT + 25))
             {
                 road_cnt++;
@@ -906,33 +978,25 @@ static TRACK_ELEMENT detect_element_segment(void)
         if (s1 == ROW_LEFT_JUMP || s1 == ROW_RIGHT_JUMP)
             return STRAIGHT;  /* 突变 → 由 detect_ring 确认 */
         if (s1 == ROW_LEFT_LOST)
-            return RIGHT_ANGLE_r;
-        if (s1 == ROW_RIGHT_LOST)
             return RIGHT_ANGLE_l;
+        if (s1 == ROW_RIGHT_LOST)
+            return RIGHT_ANGLE_r;
         if (s1 == ROW_DIVERGE)
             return BROKEN;
-        return STRAIGHT;
+        /* s1 不显著 → 落到双行比较确认 (平滑弯道分段看不出) */
     }
-
-    /* 段0=超宽 → 十字 */
-    if (s0 == ROW_WIDE)
+    else if (s0 == ROW_WIDE)
         return CROSS;
-
-    /* 段0=单边丢失 → 弯道 */
-    if (s0 == ROW_LEFT_LOST)
-        return RIGHT_ANGLE_r;
-    if (s0 == ROW_RIGHT_LOST)
+    else if (s0 == ROW_LEFT_LOST)
         return RIGHT_ANGLE_l;
-
-    /* 段0=发散 → 断桥 */
-    if (s0 == ROW_DIVERGE)
+    else if (s0 == ROW_RIGHT_LOST)
+        return RIGHT_ANGLE_r;
+    else if (s0 == ROW_DIVERGE)
         return BROKEN;
+    else if (s0 == ROW_LEFT_JUMP || s0 == ROW_RIGHT_JUMP)
+        return STRAIGHT;  /* 突变 → 让 detect_ring 处理 */
 
-    /* 段0=突变 → 保持直道, 让 detect_ring 处理 */
-    if (s0 == ROW_LEFT_JUMP || s0 == ROW_RIGHT_JUMP)
-        return STRAIGHT;
-
-    /* ---- 兜底: 双行比较 (段数不足或无匹配时) ---- */
+    /* ---- 双行比较 (分段无法判定时) ---- */
     near_y = (uint16_t)(MT9V034_HEIGHT - 20);
     far_y = (uint16_t)VISION_LOOKAHEAD_Y;
 
@@ -1025,7 +1089,7 @@ TRACK_ELEMENT track_element_judge(void)
     seg_elem = detect_element_segment();
 
     /* 进环岛: segment 像转弯, 但路前面还在 + 一侧边界鼓出 → 环岛入口 */
-    if (seg_elem == RIGHT_ANGLE_l || seg_elem == RIGHT_ANGLE_r)
+    if (seg_elem == STRAIGHT || seg_elem == RIGHT_ANGLE_l || seg_elem == RIGHT_ANGLE_r)
     {
         TRACK_ELEMENT ring_elem;
         ring_elem = detect_ring();
