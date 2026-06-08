@@ -16,6 +16,12 @@ float yaw   = 0.0f;
 static float gyro_bias_x = 0.0f;
 static float gyro_bias_y = 0.0f;
 static float gyro_bias_z = 0.0f;
+static float g_gyro_z_dps = 0.0f;   /* 偏置补偿后的 Z 轴角速度 (dps) */
+
+float icm_get_gyro_z_dps(void)
+{
+    return g_gyro_z_dps;
+}
 
 static float icm_absf(float value)
 {
@@ -111,6 +117,8 @@ void tim0_callback(void)
     {
         gyro_z = 0.0f;
     }
+
+    g_gyro_z_dps = gyro_z;
 
     acc_roll = icm_get_acc_roll_deg();
     acc_pitch = icm_get_acc_pitch_deg();

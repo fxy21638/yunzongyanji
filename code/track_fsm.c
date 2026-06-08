@@ -1,23 +1,72 @@
+// ====================================================================
+// 循迹状态机 (Track FSM) — 滞回滤波 + 每元素独立 PID/EMA/速度参数
+// ====================================================================
+//
+// 核心机制:
+//   1. 滞回转换 (debounce): 候选元素需连续 N 帧不变才确认切换
+//   2. 状态保持 (state_hold): 状态切换后锁定 M 帧, 防止反复横跳
+//   3. 每元素配置表: 位置 PID + 角度 PID + EMA + 规划策略 + 速度倍率
+//
+// 配置表字段 (track_fsm_cfg_t):
+//   Kp/Ki/Kd/integral_max  — 位置 PID (控制中线偏差 → 舵机)
+//   angle_kp/ki/kd/imax/w   — 角度 PID (控制赛道方向变化)
+//   ema_alpha               — 转向输出平滑系数 (越大越灵敏)
+//   plan                    — 目标规划策略 (PLAN_STRAIGHT/CROSS/...)
+//   speed_factor            — 速度倍率 (1.0=全速)
+//   debounce_frames         — 滞回确认帧数
+//
+// 规划策略 (track_plan_t):
+//   PLAN_STRAIGHT   (0) — 直道: 近远加权中点
+//   PLAN_TURN_LEFT  (1) — 左弯: 道路中心 + 左偏置
+//   PLAN_TURN_RIGHT (2) — 右弯: 道路中心 + 右偏置
+//   PLAN_CROSS      (3) — 十字: 取图像中心
+//   PLAN_BROKEN     (4) — 断桥后: 陀螺仪航向保持
+//   PLAN_HOLD       (5) — 保持上一帧目标不变
+//
+// 使用方式:
+//   track_fsm_init(&g_track_fsm)           — 初始化 (加载默认配置)
+//   track_fsm_set_callbacks(...)           — 注册 entry/exit 回调
+//   track_fsm_update(&g_track_fsm, raw)    — 每帧喂入原始分类结果
+//   track_fsm_get_Kp/Kd/...(&g_track_fsm) — control.c 取参
+// ====================================================================
+
 #include "track_fsm.h"
 
 track_fsm_t g_track_fsm;
 
+/* ================================================================
+ * 默认配置表 — 11 元素的 PID/EMA/规划/速度参数
+ *
+ * 字段顺序: Kp, Ki, Kd, imax, aKp, aKi, aKd, aImax, aW, EMA, plan, spd, db
+ *
+ * 调参指南:
+ *   Kp ↑ → 转向更猛, 过大振荡
+ *   Kd ↑ → 阻尼增强, 过大高频抖动
+ *   Ki ↑ → 消除稳态误差, 过大积分饱和
+ *   ema_alpha ↑ → 响应更快, 但更不平滑
+ *   speed_factor ↑ → 提速
+ *   debounce_frames ↑ → 防误触发, 但响应变慢
+ *   angle_weight ↑ → 角度环占比增加, 预判弯道更早
+ * ================================================================ */
 static const track_fsm_cfg_t s_default_cfg[TRACK_FSM_CFG_COUNT] =
-{   
+{
 	/*                      Kp     Ki    Kd    imax  aKp   aKi   aKd   aImax aW    EMA    plan             spd  db */
 	/* NONE 无效 */         {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.00f,0.80f, PLAN_HOLD,       0.0f, 1},
 	/* START 发车 */        {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.80f, PLAN_STRAIGHT,   0.50f,1},
 	/* STRAIGHT 直道 */     {0.40f,0.04f,0.28f,4.0f, 0.30f,0.02f,0.45f,2.0f, 0.20f,0.80f, PLAN_STRAIGHT,   1.0f, 2},
 	/* RIGHT_ANGLE_l 左弯 */{0.50f,0.08f,0.38f,8.0f, 0.45f,0.06f,0.55f,6.0f, 0.35f,0.75f, PLAN_TURN_LEFT,  0.55f,5},
 	/* RIGHT_ANGLE_r 右弯 */{0.50f,0.08f,0.38f,8.0f, 0.45f,0.06f,0.55f,6.0f, 0.35f,0.75f, PLAN_TURN_RIGHT, 0.55f,5},
-	/* RING_l 左环岛 */     {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,3},
-	/* RING_r 右环岛 */     {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,3},
-	/* RING_c 环岛中心 */   {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,3},
+	/* RING_l 左环岛 */     {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_TURN_LEFT,  0.65f,1},
+	/* RING_r 右环岛 */     {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_TURN_RIGHT, 0.65f,1},
+	/* RING_c 环岛中心 */   {0.38f,0.04f,0.28f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,1},
 	/* CROSS 十字路口 */    {0.30f,0.03f,0.20f,2.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.85f, PLAN_CROSS,      0.75f,2},
 	/* BROKEN 断桥通过中 */ {0.25f,0.02f,0.15f,2.0f, 0.20f,0.00f,0.35f,0.0f, 0.05f,0.90f, PLAN_HOLD,       0.45f,3},
 	/* BROKEN_RODE 断桥后 */{1.00f,0.00f,2.00f,0.0f, 0.00f,0.00f,0.00f,0.0f, 0.00f,0.60f, PLAN_BROKEN,     0.50f,2}
 };
 
+/* ================================================================
+ * 初始化 — 加载默认配置表, 清零运行状态
+ * ================================================================ */
 void track_fsm_init(track_fsm_t *fsm)
 {
     uint8_t i;
@@ -35,6 +84,17 @@ void track_fsm_init(track_fsm_t *fsm)
     }
 }
 
+/* ================================================================
+ * 滞回状态转换 — debounce 机制 + entry/exit 回调
+ *
+ * 转换流程:
+ *   raw ≠ state 且 raw ≠ pending → 设为候选, debounce_cnt=1
+ *   raw = pending               → debounce_cnt++
+ *   debounce_cnt ≥ debounce_frames → 确认转换:
+ *     on_exit(old) → state=new → on_entry(new)
+ *
+ * state_hold > 0 时跳过所有转换 (防止反复横跳)
+ * ================================================================ */
 void track_fsm_update(track_fsm_t *fsm, TRACK_ELEMENT raw_elem)
 {
     const track_fsm_cfg_t *cfg;
@@ -79,6 +139,12 @@ void track_fsm_update(track_fsm_t *fsm, TRACK_ELEMENT raw_elem)
     fsm->pending = raw_elem;
     fsm->debounce_cnt = 1;
 }
+
+/* ================================================================
+ * 参数查询 — 从当前状态的配置中取对应字段
+ *
+ * 所有 getter 都有边界保护: 状态索引越界时返回安全默认值
+ * ================================================================ */
 
 float track_fsm_get_Kp(const track_fsm_t *fsm)
 {
@@ -188,6 +254,9 @@ track_plan_t track_fsm_get_plan(const track_fsm_t *fsm)
     return fsm->cfg[idx].plan;
 }
 
+/* ================================================================
+ * 配置写入 — 运行时修改单元素配置 (调参用)
+ * ================================================================ */
 void track_fsm_set_cfg(track_fsm_t *fsm, TRACK_ELEMENT elem,
                        const track_fsm_cfg_t *cfg)
 {

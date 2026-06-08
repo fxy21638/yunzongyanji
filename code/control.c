@@ -1,4 +1,4 @@
-// Motor + steering control with Pure Pursuit and speed adaptation
+// 电机与舵机转向控制, 含速度自适应与加速度限制
 
 #include "control.h"
 #include "encoder.h"
@@ -17,6 +17,11 @@ float speed_base = 65;
 // 转向: 0=像素偏差PID, 1=Pure Pursuit (需BEV数据)
 #define VISION_USE_PURE_PURSUIT 0
 
+/* 速度自适应: 偏移越大速度越慢 */
+#define SPEED_ERR_COEFF   0.30f   /* 偏移→速度衰减系数, 越大转弯越慢 */
+#define SPEED_MIN         25.0f   /* 最低速度 */
+#define SPEED_ACCEL_MAX   1.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
+
 /* TODO: 角度环融合 — 从图像中线偏移计算赛道方向, 修正车身姿态
    ANGLE_BLEND_WEIGHT: 角度环占比 (0.15~0.35), 越大角度环越强
    ANGLE_BLEND_KP:     角度环比例 (0.2~0.6), 输入单位=中线偏移像素
@@ -34,9 +39,22 @@ float speed_now_l = 0;
 float speed_now_r = 0;
 static uint8_t speed_tune_mode = 0;
 
+/* 陀螺仪 Z 轴积分: 追踪环岛已转过角度 */
+int32_t cnt_degree = 0;
+float ring_start_yaw = 0.0f;
+
+/* 加速度限制: 记录上帧目标速度 */
+static float speed_target_prev = 0.0f;
+
 static void control_timer_callback(void)
 {
+    float gyro_z_dps;
+
     encoder_task();
+
+    /* 陀螺仪 Z 轴积分: 追踪环岛转角 */
+    gyro_z_dps = icm_get_gyro_z_dps();
+    cnt_degree += (int32_t)(gyro_z_dps * 5.0f);  /* dps × 5ms → 毫度累计 */
 
     if (speed_tune_mode)
     {
@@ -117,10 +135,29 @@ void motor_speed_control(void)
     float target_speed;
     float spd_factor;
     float fsm_speed;
+    float track_err;
+    float err_reduction;
 
     spd_factor = trail_speed_factor();
     fsm_speed  = track_fsm_get_speed_factor(&g_track_fsm);
-    target_speed = speed_base * spd_factor * fsm_speed;
+
+    /* 速度 = 基准 - 系数 × |偏移|, 偏移越大速度越慢 */
+    track_err = (float)CENTER_POINT - (float)track_midpoint_target;
+    if (track_err < 0.0f) track_err = -track_err;
+    err_reduction = SPEED_ERR_COEFF * track_err;
+    target_speed = (speed_base - err_reduction) * spd_factor * fsm_speed;
+
+    if (target_speed < SPEED_MIN)
+        target_speed = SPEED_MIN;
+
+    /* 加速度限制: 每帧最多增加 SPEED_ACCEL_MAX (防甩尾) */
+    {
+        float delta;
+        delta = target_speed - speed_target_prev;
+        if (delta > SPEED_ACCEL_MAX)
+            target_speed = speed_target_prev + SPEED_ACCEL_MAX;
+    }
+    speed_target_prev = target_speed;
 
     // 增量PID内部已累加+限幅, 直接赋值
     speed_now_l = IncrementalPID_Calculate(&speed_pid_l, target_speed - (float)encoder_data_dir[0]);
@@ -180,10 +217,10 @@ void steering_control(void)
 	    }
 #endif
 
-    // ====== Normal steering ======
+    // ====== 正常转向 ======
 #if VISION_USE_PURE_PURSUIT
-    // Pure Pursuit: use pre-computed steering angle directly
-    // pp_steering_angle is in degrees, positive = right turn
+    // 纯追踪模式: 直接使用预计算转向角
+    // pp_steering_angle 单位=度, 正值右转
     {
         float pp_err;
         float ema_alpha;
@@ -226,7 +263,7 @@ void steering_control(void)
         return;
     }
 #else
-    // Original: pixel-error based steering with per-state PID
+    // 像素偏差模式: 基于中线偏移的逐状态 PID 转向
     {
         float track_error;
         float ema_alpha;

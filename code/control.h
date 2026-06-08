@@ -17,6 +17,8 @@
 extern float speed_base;
 extern float gyro_target;
 extern uint8_t turn_step;
+extern int32_t cnt_degree;
+extern float ring_start_yaw;
 
 extern float speed_l;
 extern float speed_r;

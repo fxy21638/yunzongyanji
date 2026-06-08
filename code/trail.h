@@ -40,11 +40,11 @@ extern TRACK_ELEMENT current_element;
 extern uint8_t track_midpoint_target;
 extern uint8_t track_midpoint_target_P;
 
-// Pure Pursuit outputs (for control.c)
-extern float pp_steering_angle;   // steering angle from Pure Pursuit (degrees)
-extern float pp_lookahead_dist;   // current lookahead distance (pixels)
-extern float pp_curvature;        // estimated road curvature (1/radius)
-extern uint8_t pp_visible_high;   // visible track distance (rows)
+// 纯追踪输出 (供 control.c 使用)
+extern float pp_steering_angle;   // 纯追踪转向角 (度)
+extern float pp_lookahead_dist;   // 当前前瞻距离 (像素)
+extern float pp_curvature;        // 赛道曲率估计
+extern uint8_t pp_visible_high;   // 可见赛道行数
 
 TRACK_ELEMENT track_element_judge(void);
 void state_display(void);
