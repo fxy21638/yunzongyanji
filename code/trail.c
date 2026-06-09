@@ -51,6 +51,8 @@
 #define TRACK_TURN_BIAS          6
 /* 环岛目标偏置: 叠加在转弯偏置上, 绕岛更外 (2~8) */
 #define RING_BIAS                4
+/* 环岛中心切换阈值: 入环后转过此角度(毫度)即视为已进入环岛中心, 切换为直行规划 */
+#define RING_CENTER_DEGREE   25000
 
 /* 纯追踪参数 */
 #define PP_LOOKAHEAD_MIN   12    /* 最短前瞻距离 (像素) */
@@ -657,16 +659,6 @@ static uint8_t scan_ring_jump(void)
     return 0;
 }
 
-/* 检测环岛入口: 有边界突变 + 突变后有路 → 环岛 */
-static TRACK_ELEMENT detect_ring(void)
-{
-    uint8_t result;
-    result = scan_ring_jump();
-    if (result == 1) return RING_l;
-    if (result == 2) return RING_r;
-    return NONE;
-}
-
 /* 检测环岛出口: 边界突变消失 → 环岛结束 */
 static uint8_t detect_ring_exit(void)
 {
@@ -722,6 +714,105 @@ static int8_t  g_seg_type[SEGMENT_MAX];
 static uint8_t g_seg_start[SEGMENT_MAX];  /* 远行(小行号) */
 static uint8_t g_seg_end[SEGMENT_MAX];    /* 近行(大行号) */
 static uint8_t g_seg_num;
+
+/* 从段序列检测环岛: BOTH→单侧丢线(分叉) + 上方有路且非超宽 → 环岛
+   不再依赖逐行边界突变扫描 (真实图片边界过渡平缓, dl 达不到 10)。
+   段序列已明确告知"道路分叉", 直接以此为环岛信号。 */
+static TRACK_ELEMENT detect_ring_from_segments(void)
+{
+    int8_t s0_type;
+    int8_t s1_type;
+    uint8_t both_len;
+    uint8_t fork_y;
+    uint8_t ring_dir;
+    uint8_t road_cnt;
+    uint16_t y;
+    int16_t l_cur;
+    int16_t r_cur;
+    int16_t center;
+
+    if (g_seg_num < 2)
+        return NONE;
+
+    s0_type = g_seg_type[0];
+    s1_type = g_seg_type[1];
+
+    /* 必须有 BOTH 段打底 (近处正常道路), 且至少 10 行 */
+    if (s0_type != ROW_BOTH)
+        return NONE;
+    both_len = g_seg_start[0] - g_seg_end[0] + 1;
+    if (both_len < 10)
+        return NONE;
+
+    /* 判断分叉方向 */
+    if (s1_type == ROW_LEFT_LOST)
+        ring_dir = RING_l;
+    else if (s1_type == ROW_RIGHT_LOST)
+        ring_dir = RING_r;
+    else if (s1_type == ROW_LEFT_JUMP)
+        ring_dir = RING_l;
+    else if (s1_type == ROW_RIGHT_JUMP)
+        ring_dir = RING_r;
+    else
+        return NONE;
+
+    /* 排除十字: s2 是超宽段 → 十字路口, 不是环岛 */
+    if (g_seg_num >= 3)
+    {
+        if (g_seg_type[2] == ROW_WIDE)
+            return NONE;
+    }
+
+    /* 检查分叉上方是否有路 (≥3 行道路可见, 中线不偏太远) */
+    fork_y = g_seg_start[1];
+    road_cnt = 0;
+    for (y = (uint16_t)fork_y; y > (uint16_t)RING_SCAN_Y_FAR; y--)
+    {
+        l_cur = g_track.left[y];
+        r_cur = g_track.right[y];
+        if (l_cur > 2 || r_cur < (int16_t)(MT9V034_WIDTH - 4))
+        {
+            if (l_cur > 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
+            {
+                center = (l_cur + r_cur) / 2;
+            }
+            else if (l_cur > 2)
+            {
+                center = l_cur + 30;
+            }
+            else
+            {
+                center = r_cur - 30;
+            }
+            if (abs(center - (int16_t)CENTER_POINT) < 30)
+            {
+                road_cnt++;
+                if (road_cnt >= RING_ROAD_AHEAD_MIN)
+                    return (TRACK_ELEMENT)ring_dir;
+            }
+        }
+    }
+
+    return NONE;
+}
+
+/* 检测环岛入口: 段分叉优先 (适应真实照片), 边界突变扫描兜底 */
+static TRACK_ELEMENT detect_ring(void)
+{
+    TRACK_ELEMENT result;
+    uint8_t jump_result;
+
+    /* 优先用段分叉检测 (不依赖边界突变阈值, 真实照片可用) */
+    result = detect_ring_from_segments();
+    if (result != NONE)
+        return result;
+
+    /* 兜底: 边界突变扫描 (合成图/极端场景) */
+    jump_result = scan_ring_jump();
+    if (jump_result == 1) return RING_l;
+    if (jump_result == 2) return RING_r;
+    return NONE;
+}
 
 /* ---------- 第一遍: 根据边界存在性做基础分类 ---------- */
 static void row_classify_basic(void)
@@ -1066,10 +1157,18 @@ static TRACK_ELEMENT detect_element_segment(void)
  * detect_element_segment() — 行分类 + 分段合并 + 段序列 → 元素
  * ================================================================ */
 
-/* 主分类入口: 环岛退出 → 分段检测 → 环岛确认 → 十字回退 */
+/* 主分类入口: 段分类先行 → 环岛状态保持 → 环岛入口确认 → 十字回退
+
+   环岛生命周期 (以左环岛为例):
+     入环: 左侧边界鼓出 → 段分叉 BOTH→LEFT_LOST → RING_l (PLAN_TURN_LEFT)
+     环中: 分叉消失, 左侧持续丢线 (岛体遮挡) → 转过阈值角度后 RING_c (PLAN_STRAIGHT)
+     出环: 右侧出现分叉 (路汇合) → STRAIGHT
+
+     右环岛镜像: 入环=RIGHT_LOST分叉, 出环=LEFT_LOST分叉 */
 TRACK_ELEMENT track_element_judge(void)
 {
     TRACK_ELEMENT seg_elem;
+    TRACK_ELEMENT ring_check;
 
     if (!g_track_valid)
         return NONE;
@@ -1078,23 +1177,48 @@ TRACK_ELEMENT track_element_judge(void)
     if (g_track.feature == VISION_FEATURE_LOST)
         return BROKEN;
 
-    /* 出环岛: 当前在环岛状态, 边界鼓出消失 → 环岛结束 */
-    if (g_track_fsm.state == RING_l || g_track_fsm.state == RING_r)
-    {
-        if (detect_ring_exit())
-            return STRAIGHT;
-    }
-
-    /* 基于分段的中点偏移分类 (主要) */
+    /* 先跑段分类 (环岛入口/出口都依赖段信息) */
     seg_elem = detect_element_segment();
 
-    /* 进环岛: segment 像转弯, 但路前面还在 + 一侧边界鼓出 → 环岛入口 */
+    /* ---- 环岛状态保持 ----
+       入环后分叉会消失 (岛体遮挡近处一侧边界变成单边丢线),
+       此时不能出环岛。出环岛的信号是另一侧出现分叉。 */
+    if (g_track_fsm.state == RING_l)
+    {
+        /* 右侧出现分叉 → 左环岛出口 (路汇合) */
+        ring_check = detect_ring_from_segments();
+        if (ring_check == RING_r)
+            return STRAIGHT;
+        /* 转过阈值角度 → 环岛中心 (直行规划) */
+        if (cnt_degree >= RING_CENTER_DEGREE)
+            return RING_c;
+        return RING_l;
+    }
+    if (g_track_fsm.state == RING_r)
+    {
+        /* 左侧出现分叉 → 右环岛出口 (路汇合) */
+        ring_check = detect_ring_from_segments();
+        if (ring_check == RING_l)
+            return STRAIGHT;
+        if (cnt_degree >= RING_CENTER_DEGREE)
+            return RING_c;
+        return RING_r;
+    }
+    if (g_track_fsm.state == RING_c)
+    {
+        /* 环岛中心: 任一侧出现分叉 → 出环岛 */
+        ring_check = detect_ring_from_segments();
+        if (ring_check != NONE)
+            return STRAIGHT;
+        return RING_c;
+    }
+
+    /* ---- 进环岛: segment 像转弯, 但段序列有分叉+上方有路 → 环岛入口 ---- */
     if (seg_elem == STRAIGHT || seg_elem == RIGHT_ANGLE_l || seg_elem == RIGHT_ANGLE_r)
     {
-        TRACK_ELEMENT ring_elem;
-        ring_elem = detect_ring();
-        if (ring_elem != NONE)
-            return ring_elem;
+        ring_check = detect_ring();
+        if (ring_check != NONE)
+            return ring_check;
     }
 
     if (seg_elem != STRAIGHT)
@@ -1203,6 +1327,44 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
         target -= (int16_t)TRACK_TURN_BIAS;
 
     return clamp_center_to_target(target);
+}
+
+/* 环岛入口规划: 目标点选在环岛侧的边界上 (左环岛跟左边界, 右环岛跟右边界)
+   入环时视觉前方可能是直道, 但车应该跟随鼓出的那一侧边界进入环岛 */
+static uint8_t plan_ring_entry(TRACK_ELEMENT ring_type)
+{
+    int16_t l_far, r_far;
+    int16_t target;
+    uint16_t far_y;
+
+    far_y = (uint16_t)VISION_LOOKAHEAD_Y;
+    l_far = g_track.left[far_y];
+    r_far = g_track.right[far_y];
+
+    if (ring_type == RING_l)
+    {
+        /* 左环岛: 跟左边界 (环岛鼓出侧) */
+        if (l_far > 2)
+            target = l_far + 30;
+        else
+            target = (int16_t)CENTER_POINT - 30;
+    }
+    else
+    {
+        /* 右环岛: 跟右边界 (环岛鼓出侧) */
+        if (r_far < (int16_t)(MT9V034_WIDTH - 4))
+            target = r_far - 30;
+        else
+            target = (int16_t)CENTER_POINT + 30;
+    }
+
+    return clamp_center_to_target(target);
+}
+
+/* 环岛中心/出口规划: 上边界 (图像中心) 作为终点, 直行向上, 忽略单侧丢线的转弯假象 */
+static uint8_t plan_ring_center(void)
+{
+    return (uint8_t)CENTER_POINT;
 }
 
 
@@ -1391,11 +1553,23 @@ void track_handle(void)
     track_fsm_update(&g_track_fsm, raw_elem);
     track_element = g_track_fsm.state;
 
-    // 目标规划 — 按 FSM 规划策略委派
+    // 目标规划 — 环岛状态用专用规划函数, 其他按 FSM plan 委派
     plan = track_fsm_get_plan(&g_track_fsm);
     new_target = track_midpoint_target_P;
 
-    if (plan == PLAN_STRAIGHT)
+    if (track_element == RING_l)
+    {
+        new_target = plan_ring_entry(RING_l);
+    }
+    else if (track_element == RING_r)
+    {
+        new_target = plan_ring_entry(RING_r);
+    }
+    else if (track_element == RING_c)
+    {
+        new_target = plan_ring_center();
+    }
+    else if (plan == PLAN_STRAIGHT)
     {
         new_target = plan_straight_center();
     }
@@ -1416,15 +1590,10 @@ void track_handle(void)
     }
     /* PLAN_HOLD 和 PLAN_BROKEN: 保持上一帧目标 */
 
-    /* 环岛偏置: 左环岛向左偏(绕岛外侧), 右环岛向右偏 */
-    if (track_element == RING_l)
-        new_target = clamp_center_to_target((int16_t)new_target + (int16_t)RING_BIAS);
-    else if (track_element == RING_r)
-        new_target = clamp_center_to_target((int16_t)new_target - (int16_t)RING_BIAS);
-
     // 后处理: 跳变限幅 ±12px + 逐状态 EMA 平滑
     if (track_element != BROKEN_RODE && track_element != NONE &&
-        track_element != RIGHT_ANGLE_l && track_element != RIGHT_ANGLE_r)
+        track_element != RIGHT_ANGLE_l && track_element != RIGHT_ANGLE_r &&
+        track_element != RING_l && track_element != RING_r)
     {
         jump = (int16_t)new_target - (int16_t)track_midpoint_target_P;
         if (jump > 12)
