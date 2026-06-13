@@ -42,6 +42,10 @@ extern vision_track_result_t g_track;
 extern uint8_t g_track_valid;
 extern uint8_t g_vofa_pending;
 extern image_t image_data[MT9V034_HEIGHT * MT9V034_WIDTH];
+extern uint8_t g_target_detected;
+extern uint8_t g_target_center_x;
+extern uint8_t g_target_radius;
+extern uint8_t g_target_y_mid;
 
 static display_point_t g_left_chain[DISPLAY_MAX_CHAIN_POINTS];
 static display_point_t g_right_chain[DISPLAY_MAX_CHAIN_POINTS];
@@ -878,6 +882,95 @@ static void draw_element_indicator(uint8_t *out, TRACK_ELEMENT elem)
     }
 }
 
+/* 靶子绘制: 检测到黑色圆环时, 在叠加图上画十字准心 + 圆环轮廓 */
+static void draw_target_overlay(uint8_t *out)
+{
+    int16_t cx;
+    int16_t cy;
+    int16_t r;
+    int16_t y;
+    int16_t d;
+    int16_t x0;
+    int16_t y0;
+    int16_t x;
+
+    if (!g_target_detected)
+        return;
+
+    cx = (int16_t)g_target_center_x;
+    cy = (int16_t)g_target_y_mid;
+    r  = (int16_t)g_target_radius;
+
+    if (cx < 5 || cx >= (int16_t)(MT9V034_WIDTH - 5))
+        return;
+    if (cy < 5 || cy >= (int16_t)(MT9V034_HEIGHT - 5))
+        return;
+    if (r < 5 || r > 80)
+        return;
+
+    /* 十字准心: 7px 臂长 */
+    for (d = -7; d <= 7; d++)
+    {
+        overlay_pixel(out, (int16_t)(cx + d), cy, 0);
+        overlay_pixel(out, cx, (int16_t)(cy + d), 0);
+    }
+
+    /* 垂直虚线: 扫描范围内, 标出靶心列 */
+    y0 = (int16_t)(MT9V034_HEIGHT - 25);   /* 对应 trail.c TARGET_SCAN_Y_START = 95 */
+    for (y = (int16_t)(MT9V034_HEIGHT / 4); y <= y0; y++)  /* TARGET_SCAN_Y_END = 30 */
+    {
+        if ((y & 3) == 0)
+            overlay_pixel(out, cx, y, 0);
+    }
+
+    /* 水平虚线: 在靶心行标出靶环宽度 */
+    x0 = cx - r;
+    if (x0 < 0) x0 = 0;
+    for (x = x0; x <= cx + r && x < (int16_t)MT9V034_WIDTH; x++)
+    {
+        if ((x & 3) == 0)
+            overlay_pixel(out, x, cy, 0);
+    }
+
+    /* 圆环轮廓: Bresenham 中点画圆, 虚线 */
+    {
+        int16_t xi;
+        int16_t yi;
+        int16_t d;
+
+        xi = 0;
+        yi = r;
+        d = (int16_t)(1 - r);
+
+        while (xi <= yi)
+        {
+            /* 8 个对称点, 隔点画虚线 */
+            if ((xi & 1) == 0)
+            {
+                overlay_pixel(out, (int16_t)(cx + xi), (int16_t)(cy + yi), 0);
+                overlay_pixel(out, (int16_t)(cx - xi), (int16_t)(cy + yi), 0);
+                overlay_pixel(out, (int16_t)(cx + xi), (int16_t)(cy - yi), 0);
+                overlay_pixel(out, (int16_t)(cx - xi), (int16_t)(cy - yi), 0);
+                overlay_pixel(out, (int16_t)(cx + yi), (int16_t)(cy + xi), 0);
+                overlay_pixel(out, (int16_t)(cx - yi), (int16_t)(cy + xi), 0);
+                overlay_pixel(out, (int16_t)(cx + yi), (int16_t)(cy - xi), 0);
+                overlay_pixel(out, (int16_t)(cx - yi), (int16_t)(cy - xi), 0);
+            }
+
+            if (d < 0)
+            {
+                d += (int16_t)(2 * xi + 3);
+            }
+            else
+            {
+                d += (int16_t)(2 * (xi - yi) + 5);
+                yi--;
+            }
+            xi++;
+        }
+    }
+}
+
 static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_track_result_t *track)
 {
 	memcpy(out, gray, MT9V034_IMAGE_SIZE);
@@ -887,6 +980,7 @@ static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_t
 	draw_bev_midline_overlay(out, track);
 	draw_current_center_overlay(out, track);
 	draw_element_indicator(out, track_element);
+	draw_target_overlay(out);
 }
 
 static void render_pseudo_gray(uint8_t *out, const uint8_t *bin, const vision_track_result_t *track)

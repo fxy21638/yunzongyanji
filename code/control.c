@@ -46,6 +46,7 @@ float ring_start_yaw = 0.0f;
 /* 加速度限制: 记录上帧目标速度 */
 static float speed_target_prev = 0.0f;
 
+
 static void control_timer_callback(void)
 {
     float gyro_z_dps;
@@ -77,9 +78,11 @@ static void control_timer_callback(void)
         float spd_factor;
         float fsm_speed;
         float spd;
+        const track_fsm_cfg_t *cfg;
 
         spd_factor = trail_speed_factor();
-        fsm_speed  = track_fsm_get_speed_factor(&g_track_fsm);
+        cfg = track_fsm_get_cfg(&g_track_fsm);
+        fsm_speed = cfg->speed_factor;
         spd = (float)FIXED_PWM_DUTY * spd_factor * fsm_speed;
         speed_now_l = spd;
         speed_now_r = spd;
@@ -137,9 +140,11 @@ void motor_speed_control(void)
     float fsm_speed;
     float track_err;
     float err_reduction;
+    const track_fsm_cfg_t *cfg;
 
     spd_factor = trail_speed_factor();
-    fsm_speed  = track_fsm_get_speed_factor(&g_track_fsm);
+    cfg = track_fsm_get_cfg(&g_track_fsm);
+    fsm_speed = cfg->speed_factor;
 
     /* 速度 = 基准 - 系数 × |偏移|, 偏移越大速度越慢 */
     track_err = (float)CENTER_POINT - (float)track_midpoint_target;
@@ -180,8 +185,7 @@ void steering_control(void)
 
 	    if (!g_track_valid ||
 	        g_track.feature == VISION_FEATURE_LOST ||
-	        g_track.visible_high > (uint8_t)(MT9V034_HEIGHT - 25) ||
-	        track_element == BROKEN)
+	        g_track.visible_high > (uint8_t)(MT9V034_HEIGHT - 25) )
 	    {
 	        for (y = (uint16_t)(MT9V034_HEIGHT / 2); y < MT9V034_HEIGHT; y++)
 	        {
@@ -210,9 +214,9 @@ void steering_control(void)
 
 	    if (emergency)
 	    {
-	        speed_now_l = FIXED_PWM_DUTY / 3;
-	        speed_now_r = FIXED_PWM_DUTY / 3;
-	        servo_set_wheel_angle(steer_output);
+        speed_now_l = FIXED_PWM_DUTY / 3;
+        speed_now_r = FIXED_PWM_DUTY / 3;
+        servo_set_wheel_angle(steer_output);
 	        return;
 	    }
 #endif
@@ -223,40 +227,34 @@ void steering_control(void)
     // pp_steering_angle 单位=度, 正值右转
     {
         float pp_err;
-        float ema_alpha;
-        float fsm_Kp;
-        float fsm_Kd;
+        const track_fsm_cfg_t *cfg;
         static float steer_smooth = 0.0f;
 
-        pp_err    = pp_steering_angle;
-        ema_alpha = track_fsm_get_ema_alpha(&g_track_fsm);
+        pp_err = pp_steering_angle;
+        cfg = track_fsm_get_cfg(&g_track_fsm);
 
+        /* BROKEN_RODE 已禁用, 本次比赛无断桥
         if (track_element == BROKEN_RODE)
         {
-            fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
-            fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
-
-            pid_gyro.Kp = fsm_Kp;
-            pid_gyro.Kd = fsm_Kd;
+            pid_gyro.Kp = cfg->Kp;
+            pid_gyro.Kd = cfg->Kd;
             steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
         }
         else
+        */
         {
             float pp_gain;
             pp_gain = 0.55f;
 
-            fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
-            fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
-
-            pid_pos.Kp = fsm_Kp;
-            pid_pos.Kd = fsm_Kd;
+            pid_pos.Kp = cfg->Kp;
+            pid_pos.Kd = cfg->Kd;
             steer_output = PositionalPID_Calculate(&pid_pos, pp_err);
             steer_output = pp_err * pp_gain;
         }
 
         steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
 
-        steer_output = steer_smooth * (1.0f - ema_alpha) + steer_output * ema_alpha;
+        steer_output = steer_smooth * (1.0f - cfg->ema_alpha) + steer_output * cfg->ema_alpha;
         steer_smooth = steer_output;
 
         servo_set_wheel_angle(steer_output);
@@ -266,27 +264,24 @@ void steering_control(void)
     // 像素偏差模式: 基于中线偏移的逐状态 PID 转向
     {
         float track_error;
+        const track_fsm_cfg_t *cfg;
+        float fsm_Kp, fsm_Kd, fsm_Ki, fsm_imax;
+        float fsm_angle_kp, fsm_angle_ki, fsm_angle_kd, fsm_angle_imax, fsm_angle_w;
         float ema_alpha;
-        float fsm_Kp;
-        float fsm_Kd;
-        float fsm_Ki;
-        float fsm_imax;
-        float fsm_angle_kp;
-        float fsm_angle_ki;
-        float fsm_angle_kd;
-        float fsm_angle_imax;
-        float fsm_angle_w;
+        float speed_scale;
         static float steer_smooth = 0.0f;
 
         track_error = (float)CENTER_POINT - (float)track_midpoint_target;
-        ema_alpha  = track_fsm_get_ema_alpha(&g_track_fsm);
+        cfg = track_fsm_get_cfg(&g_track_fsm);
+        ema_alpha = cfg->ema_alpha;
 
+    /* BROKEN_RODE 已禁用, 本次比赛无断桥
     if (track_element == BROKEN_RODE)
     {
-        fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
-        fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
-        fsm_Ki = track_fsm_get_Ki(&g_track_fsm);
-        fsm_imax = track_fsm_get_integral_max(&g_track_fsm);
+        fsm_Kp = cfg->Kp;
+        fsm_Kd = cfg->Kd;
+        fsm_Ki = cfg->Ki;
+        fsm_imax = cfg->integral_max;
 
         pid_gyro.Kp = fsm_Kp;
         pid_gyro.Kd = fsm_Kd;
@@ -295,20 +290,32 @@ void steering_control(void)
         steer_output = PositionalPID_Calculate(&pid_gyro, gyro_target - yaw);
     }
     else
+    */
     {
         float pos_out;
         float ang_out;
         float track_dx;
 
-        fsm_Kp = track_fsm_get_Kp(&g_track_fsm);
-        fsm_Kd = track_fsm_get_Kd(&g_track_fsm);
-        fsm_Ki = track_fsm_get_Ki(&g_track_fsm);
-        fsm_imax = track_fsm_get_integral_max(&g_track_fsm);
-        fsm_angle_kp = track_fsm_get_angle_kp(&g_track_fsm);
-        fsm_angle_ki = track_fsm_get_angle_ki(&g_track_fsm);
-        fsm_angle_kd = track_fsm_get_angle_kd(&g_track_fsm);
-        fsm_angle_imax = track_fsm_get_angle_imax(&g_track_fsm);
-        fsm_angle_w  = track_fsm_get_angle_weight(&g_track_fsm);
+        fsm_Kp = cfg->Kp;
+        fsm_Kd = cfg->Kd;
+        fsm_Ki = cfg->Ki;
+        fsm_imax = cfg->integral_max;
+        fsm_angle_kp = cfg->angle_kp;
+        fsm_angle_ki = cfg->angle_ki;
+        fsm_angle_kd = cfg->angle_kd;
+        fsm_angle_imax = cfg->angle_imax;
+        fsm_angle_w  = cfg->angle_weight;
+
+        /* 速度自适应: 高速时略微增大转向增益 */
+        {
+            float eff_speed;
+            eff_speed = speed_base * trail_speed_factor() * cfg->speed_factor;
+            speed_scale = 1.0f + (eff_speed - 25.0f) * 0.005f;
+            if (speed_scale > 1.18f) speed_scale = 1.18f;
+            if (speed_scale < 1.0f) speed_scale = 1.0f;
+            fsm_Kp *= speed_scale;
+            fsm_Kd *= speed_scale;
+        }
 
         /* 图像赛道方向: 中线近远偏移 */
         {
@@ -358,7 +365,7 @@ void steering_control(void)
 
     steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
 
-    steer_output = steer_smooth * (1.0f - ema_alpha) + steer_output * ema_alpha;
+    steer_output = steer_smooth * (1.0f - cfg->ema_alpha) + steer_output * cfg->ema_alpha;
     steer_smooth = steer_output;
 
     servo_set_wheel_angle(steer_output);

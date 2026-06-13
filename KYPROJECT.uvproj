@@ -415,6 +415,16 @@
               <FilePath>.\code\track_fsm.h</FilePath>
             </File>
             <File>
+              <FileName>ring_fsm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\ring_fsm.c</FilePath>
+            </File>
+            <File>
+              <FileName>ring_fsm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\ring_fsm.h</FilePath>
+            </File>
+            <File>
               <FileName>vision.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\code\vision.c</FilePath>

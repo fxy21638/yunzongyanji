@@ -46,6 +46,9 @@
 #define IMG_H               ((uint16_t)MT9V034_HEIGHT)  // 120
 #define IMG_SIZE            ((uint16_t)(IMG_W * IMG_H))
 
+#define MID_TRUST_TOP_MARGIN 8    /* 顶部不采信: Hightest 以上 8 行 */
+#define MID_TRUST_BOT_MARGIN 8    /* 底部不采信: 图像底部 8 行 */
+
 #define BORDER_MAX          (IMG_W - 2)   // 186
 #define BORDER_MIN          1
 
@@ -1143,7 +1146,12 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
             {
                 res->left[y]  = l;
                 res->right[y] = r;
-                res->mid[y]   = (int16_t)Center_Line_arr[y];
+                /* 顶部和底部中线不采信: 上留 8 行, 下留 8 行, 上位机也不画 */
+                if (y < ((uint16_t)Hightest + MID_TRUST_TOP_MARGIN) ||
+                    y >= (uint16_t)(IMG_H - MID_TRUST_BOT_MARGIN))
+                    res->mid[y] = -1;
+                else
+                    res->mid[y] = (int16_t)Center_Line_arr[y];
                 res->valid_rows++;
             }
             else

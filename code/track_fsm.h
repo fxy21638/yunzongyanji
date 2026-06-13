@@ -69,6 +69,7 @@ void  track_fsm_init(track_fsm_t *fsm);                          /* 加载默认
 void  track_fsm_update(track_fsm_t *fsm, TRACK_ELEMENT raw_elem); /* 每帧喂入原始分类, 执行滞回转换 */
 
 /* ---- 参数查询 — control.c 每帧从 FSM 取当前状态的 PID/EMA/速度 ---- */
+const track_fsm_cfg_t *track_fsm_get_cfg(const track_fsm_t *fsm);      /* 一步取所有参数, 替代 11 次 getter 调用 */
 float         track_fsm_get_Kp(const track_fsm_t *fsm);            /* 位置环比例 */
 float         track_fsm_get_Kd(const track_fsm_t *fsm);            /* 位置环微分 */
 float         track_fsm_get_Ki(const track_fsm_t *fsm);            /* 位置环积分 */
