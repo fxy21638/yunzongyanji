@@ -1,4 +1,4 @@
-﻿// ====================================================================
+// ====================================================================
 // 赛道元素分类 + 目标点规划 — 循迹管线第 2 层
 // ====================================================================
 //
@@ -1322,9 +1322,9 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
 
     /* 向弯道内侧偏移, 增大切入力度 */
     if (turn_type == RIGHT_ANGLE_r)
-        target += (int16_t)TRACK_TURN_BIAS;
+        target += 0;//(int16_t)TRACK_TURN_BIAS;
     else if (turn_type == RIGHT_ANGLE_l)
-        target -= (int16_t)TRACK_TURN_BIAS;
+        target -= 0;//(int16_t)TRACK_TURN_BIAS;
 
     return clamp_center_to_target(target);
 }

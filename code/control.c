@@ -18,9 +18,9 @@ float speed_base = 65;
 #define VISION_USE_PURE_PURSUIT 0
 
 /* 速度自适应: 偏移越大速度越慢 */
-#define SPEED_ERR_COEFF   0.30f   /* 偏移→速度衰减系数, 越大转弯越慢 */
+#define SPEED_ERR_COEFF   0.20f   /* 偏移→速度衰减系数, 越大转弯越慢 */
 #define SPEED_MIN         25.0f   /* 最低速度 */
-#define SPEED_ACCEL_MAX   1.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
+#define SPEED_ACCEL_MAX   3.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
 
 /* TODO: 角度环融合 — 从图像中线偏移计算赛道方向, 修正车身姿态
    ANGLE_BLEND_WEIGHT: 角度环占比 (0.15~0.35), 越大角度环越强
