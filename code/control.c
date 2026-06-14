@@ -22,17 +22,6 @@ float speed_base = 65;
 #define SPEED_MIN         25.0f   /* 最低速度 */
 #define SPEED_ACCEL_MAX   1.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
 
-/* 差速辅助转向: 内侧轮减速比例 */
-#define DIFF_MAX_FACTOR   0.70f   /* 满角度差速时内侧轮减速上限 */
-#define DIFF_DEADZONE     2.0f    /* 死区: ±2° 内不启动差速 */
-
-/* 转向保护: 防突变 + 防长时间打死 */
-#define TRACK_ERROR_MAX     50.0f   /* 中线偏移上限, 超此值按异常处理 */
-#define POS_OUT_MAX         15.0f   /* 位置环输出上限 (度) */
-#define ANG_OUT_MAX         10.0f   /* 角度环输出上限 (度) */
-#define STEER_MAX_STEP      5.0f    /* 每帧舵角最大变化量 (度) */
-#define STEER_SAT_TIMEOUT   30      /* 连续饱和帧数, 超此值逐步回中 */
-
 /* TODO: 角度环融合 — 从图像中线偏移计算赛道方向, 修正车身姿态
    ANGLE_BLEND_WEIGHT: 角度环占比 (0.15~0.35), 越大角度环越强
    ANGLE_BLEND_KP:     角度环比例 (0.2~0.6), 输入单位=中线偏移像素
@@ -277,17 +266,12 @@ void steering_control(void)
         float track_error;
         const track_fsm_cfg_t *cfg;
         float fsm_Kp, fsm_Kd, fsm_Ki, fsm_imax;
-        float fsm_angle_kp, fsm_angle_ki, fsm_angle_kd, fsm_angle_imax;
-        float diff_strength;
-        float pos_out;
-        float ang_out;
-        float track_dx;
+        float fsm_angle_kp, fsm_angle_ki, fsm_angle_kd, fsm_angle_imax, fsm_angle_w;
         float ema_alpha;
         float speed_scale;
         static float steer_smooth = 0.0f;
 
         track_error = (float)CENTER_POINT - (float)track_midpoint_target;
-        track_error = SATURATE(track_error, -TRACK_ERROR_MAX, TRACK_ERROR_MAX);
         cfg = track_fsm_get_cfg(&g_track_fsm);
         ema_alpha = cfg->ema_alpha;
 
@@ -308,6 +292,10 @@ void steering_control(void)
     else
     */
     {
+        float pos_out;
+        float ang_out;
+        float track_dx;
+
         fsm_Kp = cfg->Kp;
         fsm_Kd = cfg->Kd;
         fsm_Ki = cfg->Ki;
@@ -316,7 +304,7 @@ void steering_control(void)
         fsm_angle_ki = cfg->angle_ki;
         fsm_angle_kd = cfg->angle_kd;
         fsm_angle_imax = cfg->angle_imax;
-        diff_strength = cfg->angle_weight;  /* 差速辅助强度 0.0~1.0 */
+        fsm_angle_w  = cfg->angle_weight;
 
         /* 速度自适应: 高速时略微增大转向增益 */
         {
@@ -363,7 +351,6 @@ void steering_control(void)
         pid_pos.Ki = fsm_Ki;
         pid_pos.integral_max = fsm_imax;
         pos_out = PositionalPID_Calculate(&pid_pos, track_error);
-        pos_out = SATURATE(pos_out, -POS_OUT_MAX, POS_OUT_MAX);
 
         /* 角度 PID: 赛道右偏(dx>0) → 右转(-dx<0) */
         pid_gyro.Kp = fsm_angle_kp;
@@ -371,69 +358,17 @@ void steering_control(void)
         pid_gyro.Kd = fsm_angle_kd;
         pid_gyro.integral_max = fsm_angle_imax;
         ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
-        ang_out = SATURATE(ang_out, -ANG_OUT_MAX, ANG_OUT_MAX);
 
+        steer_output = pos_out * (1.0f - fsm_angle_w)
+                     + ang_out * fsm_angle_w;
     }
 
-    /* ---- 位置 PID 输出 → 舵机 (EMA/限幅/饱和保护) ---- */
-    pos_out = SATURATE(pos_out, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
+    steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
 
-    pos_out = steer_smooth * (1.0f - cfg->ema_alpha) + pos_out * cfg->ema_alpha;
+    steer_output = steer_smooth * (1.0f - cfg->ema_alpha) + steer_output * cfg->ema_alpha;
+    steer_smooth = steer_output;
 
-    /* 变化率限制: 每帧最多变化 ±STEER_MAX_STEP 度, 防止突然打死 */
-    {
-        float steer_delta;
-        steer_delta = pos_out - steer_smooth;
-        if (steer_delta > STEER_MAX_STEP)
-            pos_out = steer_smooth + STEER_MAX_STEP;
-        else if (steer_delta < -STEER_MAX_STEP)
-            pos_out = steer_smooth - STEER_MAX_STEP;
-    }
-    steer_smooth = pos_out;
-
-    /* 饱和超时保护: 连续满舵超过阈值 → 逐步回中, 防止卡死 */
-    {
-        static uint8_t sat_cnt = 0;
-        float pos_abs;
-        pos_abs = (pos_out < 0.0f) ? -pos_out : pos_out;
-        if (pos_abs >= (STEER_OUTPUT_LIMIT - 0.5f))
-        {
-            sat_cnt++;
-            if (sat_cnt > STEER_SAT_TIMEOUT)
-            {
-                pos_out *= 0.7f;
-                sat_cnt = STEER_SAT_TIMEOUT;
-            }
-        }
-        else
-        {
-            sat_cnt = 0;
-        }
-    }
-
-    servo_set_wheel_angle(pos_out);
-
-    /* ---- 差速辅助: 角度环输出 → 内侧轮减速 (与舵机解耦) ---- */
-    {
-        float ang_abs;
-        ang_abs = (ang_out < 0.0f) ? -ang_out : ang_out;
-        if (ang_abs > DIFF_DEADZONE)
-        {
-            float diff_ratio;
-            float diff_amount;
-            diff_ratio = ang_abs / ANG_OUT_MAX;
-            if (diff_ratio > 1.0f) diff_ratio = 1.0f;
-            diff_amount = diff_ratio * DIFF_MAX_FACTOR * diff_strength;
-            if (ang_out > 0.0f)
-            {
-                speed_now_r *= (1.0f - diff_amount);
-            }
-            else
-            {
-                speed_now_l *= (1.0f - diff_amount);
-            }
-        }
-    }
+    servo_set_wheel_angle(steer_output);
     }
 #endif
 }

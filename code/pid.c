@@ -10,20 +10,13 @@ float PositionalPID_Calculate(PositionalPID *pid, float error)
     float derivative;
     float output;
 
-    if (pid->Ki != 0.0f)
+    pid->integral += error;
+    if (pid->integral_max > 0.0f)
     {
-        pid->integral += error;
-        if (pid->integral_max > 0.0f)
-        {
-            if (pid->integral > pid->integral_max)
-                pid->integral = pid->integral_max;
-            else if (pid->integral < -pid->integral_max)
-                pid->integral = -pid->integral_max;
-        }
-    }
-    else
-    {
-        pid->integral = 0.0f;
+        if (pid->integral > pid->integral_max)
+            pid->integral = pid->integral_max;
+        else if (pid->integral < -pid->integral_max)
+            pid->integral = -pid->integral_max;
     }
     derivative = error - pid->prev_error;
     output = pid->Kp * error + pid->integral * pid->Ki + pid->Kd * derivative;
