@@ -1,7 +1,7 @@
 #include "main.h"
 
-IncrementalPID speed_pid_l = {0.60f, 0.15f, 0.50f, -1200.0f, 1200.0f, 0.0f, 0.0f, 0.0f};
-IncrementalPID speed_pid_r = {0.55f, 0.12f, 0.36f, -1200.0f, 1200.0f, 0.0f, 0.0f, 0.0f};
+IncrementalPID speed_pid_l = {0.60f, 0.15f, 0.50f, -1500.0f, 1500.0f, 0.0f, 0.0f, 0.0f};
+IncrementalPID speed_pid_r = {0.55f, 0.12f, 0.36f, -1500.0f, 1500.0f, 0.0f, 0.0f, 0.0f};
 PositionalPID pid_pos = {0.40f, 0.28f, 0.04f, 0.0f, 4.0f, 0.0f};
 PositionalPID pid_gyro = {1.00f, 2.00f, 0.00f, 0.0f, 0.0f, 0.0f};
 
