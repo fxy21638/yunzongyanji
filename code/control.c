@@ -8,7 +8,7 @@
 #include "vision.h"
 #include "track_fsm.h"
 
-float speed_base = 65;
+float speed_base = 800;
 
 // 速度模式: 1=开环固定PWM, 0=编码器闭环增量PID
 #define FIXED_SPEED_DEBUG 0
@@ -18,9 +18,9 @@ float speed_base = 65;
 #define VISION_USE_PURE_PURSUIT 0
 
 /* 速度自适应: 偏移越大速度越慢 */
-#define SPEED_ERR_COEFF   0.20f   /* 偏移→速度衰减系数, 越大转弯越慢 */
-#define SPEED_MIN         25.0f   /* 最低速度 */
-#define SPEED_ACCEL_MAX   3.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
+#define SPEED_ERR_COEFF   0.10f   /* 偏移→速度衰减系数, 越大转弯越慢 */
+#define SPEED_MIN         100.0f  /* 最低速度 */
+#define SPEED_ACCEL_MAX   30.0f   /* 每帧(5ms)最大加速量, 防甩尾 */
 
 /* 差速辅助转向: 内侧轮减速比例 */
 #define DIFF_MAX_FACTOR   0.70f   /* 满角度差速时内侧轮减速上限 */
