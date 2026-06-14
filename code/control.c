@@ -8,7 +8,7 @@
 #include "vision.h"
 #include "track_fsm.h"
 
-float speed_base = 65;
+float speed_base = 85;
 
 // 速度模式: 1=开环固定PWM, 0=编码器闭环增量PID
 #define FIXED_SPEED_DEBUG 0
@@ -20,7 +20,7 @@ float speed_base = 65;
 /* 速度自适应: 偏移越大速度越慢 */
 #define SPEED_ERR_COEFF   0.30f   /* 偏移→速度衰减系数, 越大转弯越慢 */
 #define SPEED_MIN         25.0f   /* 最低速度 */
-#define SPEED_ACCEL_MAX   1.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
+#define SPEED_ACCEL_MAX   1.5f    /* 每帧(5ms)最大加速量, 防甩尾 */
 
 /* TODO: 角度环融合 — 从图像中线偏移计算赛道方向, 修正车身姿态
    ANGLE_BLEND_WEIGHT: 角度环占比 (0.15~0.35), 越大角度环越强
@@ -125,6 +125,7 @@ void motor_clear(void)
     speed_r = 0;
     speed_now_l = 0;
     speed_now_r = 0;
+    speed_target_prev = 0.0f;
     speed_pid_l.output = 0;
     speed_pid_l.error_prev = 0;
     speed_pid_l.error_prev2 = 0;
@@ -145,6 +146,24 @@ void motor_speed_control(void)
     spd_factor = trail_speed_factor();
     cfg = track_fsm_get_cfg(&g_track_fsm);
     fsm_speed = cfg->speed_factor;
+
+    /* 预减速: 若 pending 是弯道/环岛, 提前用目标元素的较低速度 */
+    if (g_track_fsm.pending == RIGHT_ANGLE_l
+        || g_track_fsm.pending == RIGHT_ANGLE_r
+        || g_track_fsm.pending == RING_l
+        || g_track_fsm.pending == RING_r
+        || g_track_fsm.pending == RING_c)
+    {
+        uint8_t pi;
+        float pending_spd;
+        pi = (uint8_t)g_track_fsm.pending;
+        if (pi < TRACK_FSM_CFG_COUNT)
+        {
+            pending_spd = g_track_fsm.cfg[pi].speed_factor;
+            if (pending_spd < fsm_speed)
+                fsm_speed = pending_spd;
+        }
+    }
 
     /* 速度 = 基准 - 系数 × |偏移|, 偏移越大速度越慢 */
     track_err = (float)CENTER_POINT - (float)track_midpoint_target;

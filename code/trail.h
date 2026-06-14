@@ -43,6 +43,7 @@ extern uint8_t g_target_detected;
 extern uint8_t g_target_center_x;
 extern uint8_t g_target_radius;
 extern uint8_t g_target_y_mid;
+extern uint8_t g_out_of_bounds;
 
 // 纯追踪输出 (供 control.c 使用)
 extern float pp_steering_angle;   // 纯追踪转向角 (度)
