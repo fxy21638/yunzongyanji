@@ -27,7 +27,7 @@ typedef enum TRACK_ELEMENT
 } TRACK_ELEMENT;
 
 extern uint8_t white_count;
-extern uint8_t straight_target;
+
 extern uint8_t white_segments[20];
 extern uint8_t time_search;
 extern uint8_t start_stage;
@@ -39,6 +39,10 @@ extern TRACK_ELEMENT track_element_P;
 extern TRACK_ELEMENT current_element;
 extern uint8_t track_midpoint_target;
 extern uint8_t track_midpoint_target_P;
+extern uint8_t g_target_detected;
+extern uint8_t g_target_center_x;
+extern uint8_t g_target_radius;
+extern uint8_t g_target_y_mid;
 
 // 纯追踪输出 (供 control.c 使用)
 extern float pp_steering_angle;   // 纯追踪转向角 (度)
@@ -49,7 +53,17 @@ extern uint8_t pp_visible_high;   // 可见赛道行数
 TRACK_ELEMENT track_element_judge(void);
 void state_display(void);
 void track_handle(void);
-void track_straight_target(uint8_t position);
+
 float trail_speed_factor(void);
+
+/* ---- 段分类数据 (供 ring_fsm 使用) ---- */
+#define SEGMENT_MAX 12
+extern int8_t  g_seg_type[SEGMENT_MAX];
+extern uint8_t g_seg_start[SEGMENT_MAX];
+extern uint8_t g_seg_end[SEGMENT_MAX];
+extern uint8_t g_seg_num;
+
+/* ---- 中线限幅 (供 ring_fsm 使用) ---- */
+uint8_t clamp_center_to_target(int16_t center_x);
 
 #endif

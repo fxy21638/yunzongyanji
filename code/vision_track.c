@@ -46,6 +46,9 @@
 #define IMG_H               ((uint16_t)MT9V034_HEIGHT)  // 120
 #define IMG_SIZE            ((uint16_t)(IMG_W * IMG_H))
 
+#define MID_TRUST_TOP_MARGIN 8    /* 顶部不采信: Hightest 以上 8 行 */
+#define MID_TRUST_BOT_MARGIN 8    /* 底部不采信: 图像底部 8 行 */
+
 #define BORDER_MAX          (IMG_W - 2)   // 186
 #define BORDER_MIN          1
 
@@ -55,8 +58,8 @@
 #define BLACK_PIXEL         0
 
 // Image_Filter 8邻域和阈值
-#define THRESHOLD_MAX       (255u * 5u)
-#define THRESHOLD_MIN       (255u * 2u)
+#define THRESHOLD_MAX       (255u * 3u)
+#define THRESHOLD_MIN       (255u * 1u)
 
 // Lose_Line 丢线判断 (R_Border >= IMG_W-4=184 视为丢线)
 #define LOSE_LINE_R_TH      (IMG_W - 4)   // 184
@@ -363,31 +366,33 @@ static void Turn_To_Bin(uint8_t *gray, uint8_t *bin, uint8_t *out_thr)
 }
 
 /* ============================================================
- * Image_Filter — 8邻域和阈值滤波
- * sum >= 255*5 → 填白(255), sum <= 255*2 → 填黑(0)
+ * Image_Filter — 4邻域和阈值滤波 (上下左右, 16bit加速)
+ * sum >= 255*3 → 填白(255), sum <= 255*1 → 填黑(0)
  * ============================================================ */
 static void Image_Filter(uint8_t *bin)
 {
     uint16_t i, j;
-    uint32_t num;
+    uint16_t num;
+    uint16_t row_prev;
+    uint16_t row_cur;
+    uint16_t row_next;
 
     for (i = 1; i < (uint16_t)(IMG_H - 1); i++)
     {
+        row_prev = (uint16_t)(i - 1) * IMG_W;
+        row_cur  = (uint16_t)i * IMG_W;
+        row_next = (uint16_t)(i + 1) * IMG_W;
         for (j = 1; j < (uint16_t)(IMG_W - 1); j++)
         {
-            num = (uint32_t)bin[(i - 1) * IMG_W + (j - 1)]
-                + (uint32_t)bin[(i - 1) * IMG_W + j]
-                + (uint32_t)bin[(i - 1) * IMG_W + (j + 1)]
-                + (uint32_t)bin[i * IMG_W + (j - 1)]
-                + (uint32_t)bin[i * IMG_W + (j + 1)]
-                + (uint32_t)bin[(i + 1) * IMG_W + (j - 1)]
-                + (uint32_t)bin[(i + 1) * IMG_W + j]
-                + (uint32_t)bin[(i + 1) * IMG_W + (j + 1)];
+            num = (uint16_t)bin[row_prev + j]
+                + (uint16_t)bin[row_cur + (j - 1)]
+                + (uint16_t)bin[row_cur + (j + 1)]
+                + (uint16_t)bin[row_next + j];
 
-            if (num >= THRESHOLD_MAX && bin[i * IMG_W + j] == 0)
-                bin[i * IMG_W + j] = 255;
-            if (num <= THRESHOLD_MIN && bin[i * IMG_W + j] == 255)
-                bin[i * IMG_W + j] = 0;
+            if (num >= THRESHOLD_MAX && bin[row_cur + j] == 0)
+                bin[row_cur + j] = 255;
+            if (num <= THRESHOLD_MIN && bin[row_cur + j] == 255)
+                bin[row_cur + j] = 0;
         }
     }
 }
@@ -1107,16 +1112,7 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
     if (mid_val < 0)   mid_val = 0;
     if (mid_val > (int16_t)(IMG_W - 1)) mid_val = (int16_t)(IMG_W - 1);
 
-    // 10. 翻转二值图回 YG 约定 (track=0, bg=255) — VOFA 显示兼容
-    {
-        uint16_t fi;
-        for (fi = 0; fi < IMG_SIZE; fi++)
-        {
-            bin[fi] = (bin[fi] == WHITE_PIXEL) ? 0 : 255;
-        }
-    }
-
-    // 11. 帧间平滑
+    // 10. 帧间平滑
     if (g_last_center_x >= 0)
     {
         mid_val = (int16_t)(((int32_t)mid_val + (int32_t)g_last_center_x) / 2);
@@ -1125,7 +1121,7 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
     res->center_x = mid_val;
     res->error_x  = (int16_t)(mid_val - (int16_t)(IMG_W / 2));
 
-    // 12. 填充输出结果 (逐行数组, 用于 trail.c 和 VOFA 显示)
+    // 11. 翻转二值图 + 填充输出结果 (合并遍历, 用于 trail.c 和 VOFA 显示)
     {
         uint16_t y;
         int16_t l, r;
@@ -1135,6 +1131,14 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
 
         for (y = 0; y < IMG_H; y++)
         {
+            uint16_t x;
+            uint16_t row_off;
+            row_off = y * IMG_W;
+            for (x = 0; x < IMG_W; x++)
+            {
+                bin[row_off + x] = (bin[row_off + x] == WHITE_PIXEL) ? 0 : 255;
+            }
+
             l = (int16_t)L_Border[y];
             r = (int16_t)R_Border[y];
 
@@ -1143,7 +1147,12 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
             {
                 res->left[y]  = l;
                 res->right[y] = r;
-                res->mid[y]   = (int16_t)Center_Line_arr[y];
+                /* 顶部和底部中线不采信: 上留 8 行, 下留 8 行, 上位机也不画 */
+                if (y < ((uint16_t)Hightest + MID_TRUST_TOP_MARGIN) ||
+                    y >= (uint16_t)(IMG_H - MID_TRUST_BOT_MARGIN))
+                    res->mid[y] = -1;
+                else
+                    res->mid[y] = (int16_t)Center_Line_arr[y];
                 res->valid_rows++;
             }
             else

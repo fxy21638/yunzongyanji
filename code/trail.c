@@ -15,9 +15,9 @@
 // 内部模块:
 //   - 纯追踪 (Pure Pursuit): 中线点集 → 前瞻距离 → 转向角 + 曲率估计
 //   - 速度决策: 曲率降速 + 视距降速, 取保守值
-//   - 环岛检测: 逐行边界突变扫描 (scan_ring_jump → detect_ring)
+//   - 环岛检测: 委托 ring_fsm (段分叉+边界突变, 条件1+条件2同时验证)
 //   - 行分类 + 分段合并: 7 种行类型 → 段序列 → 元素识别
-//   - 目标规划: 直道(近远加权) / 弯道(道路中心估计+偏置) / 十字(图像中心)
+//   - 目标规划: 直道(近远加权) / 弯道(道路中心估计+偏置) / 十字(图像中心) / 环岛(ring_fsm)
 // ====================================================================
 
 #ifndef __INTELLISENSE__
@@ -27,37 +27,36 @@
 #include "trail.h"
 #include "main.h"
 #include "track_fsm.h"
+#include "ring_fsm.h"
+
+extern uint8_t xdata mt9v034_image[MT9V034_HEIGHT][MT9V034_WIDTH];
 
 /* ================================================================
  * 第 1 节 — 常量定义
  * ================================================================ */
 
 /* 目标规划参数 */
-#define TRACK_LOOKAHEAD_Y_NEAR (MT9V034_HEIGHT - 22)  /* 直道近点行: 98 */
-#define TRACK_LOOKAHEAD_Y_FAR  (MT9V034_HEIGHT / 2)   /* 直道远点行: 60 (权重 67%) */
-#define TRACK_EDGE_NEAR_TH     3
-#define TRACK_WIDE_TH          (MT9V034_WIDTH * 7 / 10)
+#define TRACK_LOOKAHEAD_Y_NEAR (MT9V034_HEIGHT - 22) /* 直道近点行: 98 */
+#define TRACK_LOOKAHEAD_Y_FAR (MT9V034_HEIGHT / 2)   /* 直道远点行: 60 (权重 67%) */
+#define TRACK_EDGE_NEAR_TH 3
+#define TRACK_WIDE_TH (MT9V034_WIDTH * 7 / 10)
 
 /* 调试开关 */
-#define TRAIL_DBG_PRINTF       0
+#define TRAIL_DBG_PRINTF 0
 
 /* 弯道/十字检测参数 */
 #define TRACK_MIN_VALID_TURN_ROWS 8
-#define CROSS_MIN_STREAK          3
-#define CROSS_TOUCH_MARGIN        4
-#define CROSS_WIDE_EXTRA_NUM      5
+#define CROSS_MIN_STREAK 3
+#define CROSS_TOUCH_MARGIN 4
+#define CROSS_WIDE_EXTRA_NUM 5
 
 /* 转弯目标偏置: 向弯道内侧偏移, 越大切入越深 (3~10) */
-#define TRACK_TURN_BIAS          6
-/* 环岛目标偏置: 叠加在转弯偏置上, 绕岛更外 (2~8) */
-#define RING_BIAS                4
-/* 环岛中心切换阈值: 入环后转过此角度(毫度)即视为已进入环岛中心, 切换为直行规划 */
-#define RING_CENTER_DEGREE   25000
+#define TRACK_TURN_BIAS 6
 
 /* 纯追踪参数 */
-#define PP_LOOKAHEAD_MIN   12    /* 最短前瞻距离 (像素) */
-#define PP_LOOKAHEAD_MAX   70    /* 最长前瞻距离 (像素) */
-#define PP_LOOKAHEAD_SCALE 4     /* 前瞻 = 速度 / SCALE */
+#define PP_LOOKAHEAD_MIN 12  /* 最短前瞻距离 (像素) */
+#define PP_LOOKAHEAD_MAX 70  /* 最长前瞻距离 (像素) */
+#define PP_LOOKAHEAD_SCALE 4 /* 前瞻 = 速度 / SCALE */
 
 /* VOFA+ Firewater 遥测 (通过 CDC 发送 10 个 float) */
 #define VOFA_FIREWATER 0
@@ -70,27 +69,33 @@
  * ================================================================ */
 
 uint8_t white_count = 0;
-uint8_t straight_target = 0;
+
 uint8_t white_segments[20] = {0};
 uint8_t time_search = 0;
 
 /* 元素分类结果 (FSM 滤波后) */
 TRACK_ELEMENT track_element = NONE;
-TRACK_ELEMENT track_element_P = NONE;    /* 上一帧 */
-TRACK_ELEMENT current_element = NONE;    /* 原始分类 (未滤波) */
+TRACK_ELEMENT track_element_P = NONE; /* 上一帧 */
+TRACK_ELEMENT current_element = NONE; /* 原始分类 (未滤波) */
 uint8_t track_midpoint_target = CENTER_POINT;
 uint8_t track_midpoint_target_P = CENTER_POINT;
 
 /* 纯追踪输出 (供 control.c 使用) */
-float pp_steering_angle = 0.0f;   /* 转向角 (度), 正值右转 */
-float pp_lookahead_dist = 25.0f;  /* 当前前瞻距离 (像素) */
-float pp_curvature = 0.0f;        /* 赛道曲率估计 (×1000) */
-uint8_t pp_visible_high = 120;    /* 可见赛道行数 */
+float pp_steering_angle = 0.0f;  /* 转向角 (度), 正值右转 */
+float pp_lookahead_dist = 25.0f; /* 当前前瞻距离 (像素) */
+float pp_curvature = 0.0f;       /* 赛道曲率估计 (×1000) */
+uint8_t pp_visible_high = 120;   /* 可见赛道行数 */
+
+/* 靶子检测 (独立于赛道元素) */
+uint8_t g_target_detected = 0;  /* 当前帧检测到靶子 */
+uint8_t g_target_center_x = 94; /* 靶心 x 坐标 */
+uint8_t g_target_radius = 30;   /* 靶环内径的一半 */
+uint8_t g_target_y_mid = 60;    /* 靶心所在行 y */
 
 /* 断桥状态 */
 uint8_t start_stage = 0;
 uint8_t broken_flag = 0;
-int32_t judge_distance = 0;       /* 断桥累计行驶距离 */
+int32_t judge_distance = 0; /* 断桥累计行驶距离 */
 
 /* ================================================================
  * 第 3 节 — 元素名称 (调试用)
@@ -332,7 +337,7 @@ static uint8_t count_cross_rows(const vision_track_result_t *track)
 /* ================================================================
  * Helper utilities
  * ================================================================ */
-static uint8_t clamp_center_to_target(int16_t center_x)
+uint8_t clamp_center_to_target(int16_t center_x)
 {
     if (center_x < 0)
         return 0;
@@ -341,6 +346,7 @@ static uint8_t clamp_center_to_target(int16_t center_x)
     return (uint8_t)center_x;
 }
 
+/* [本次比赛无断桥, 辅助函数已注释]
 static uint16_t get_broken_progress(void)
 {
     int16_t left_abs, right_abs;
@@ -367,6 +373,7 @@ static uint8_t broken_judged(void)
         return 1;
     return 0;
 }
+*/
 
 static int16_t find_mid_at_or_above(uint16_t y_start)
 {
@@ -464,216 +471,14 @@ static uint8_t detect_cross_scene(void)
 }
 
 /* ================================================================
- * 第 7 节 — 环岛检测 (逐行边界突变扫描)
- *
- * scan_ring_jump() 从近到远逐行扫描, 找一侧边界突然大幅跳变("刺入"),
- * 同时另一侧保持稳定, 跳变上方仍有路(中线居中)确认岛后通路。
- * 以此区分环岛(跳变后有路)和普通转弯/断头路(跳变后没路)。
- *
- * 检测逻辑:
- *   0. 从近行找第一个双边可见行 (允许近行丢线, 向上搜索最多 8 行)
- *   1. 积累稳定直道段: |dl|<3 且 |dr|<3 连续 >=5 行
- *   2. 检测单侧跳变: dl<-10(左) 或 dr>+10(右), 对侧 |变化|<3
- *      - 双边→单边丢线也算跳变 (环岛入口特征: 一侧边界突然刺入画面边缘)
- *   3. 跳变上方验证有路: >=3 行道路可见 + 中线估计在中心 +-25px 内
- *      - 允许单侧可见 (环岛入口上方只有一侧边界可见, 用半道宽估计中线)
- *
- * detect_ring()      — 有跳变 + 跳变后有路 → 返回 RING_l / RING_r
- * detect_ring_exit() — 无跳变 → 鼓出消失 → 返回 1 (出环岛)
- * ================================================================ */
-#define RING_SUDDEN_TH      10   /* 边界突变下限: |dl/dr|>10 认为跳变 */
-#define RING_SUDDEN_MAX     40   /* 边界突变上限: |dl/dr|>40 视为追踪伪影 */
-#define RING_STABLE_TH       3   /* 稳定段 dl/dr 上限: |dl/dr|<3 认为平滑 */
-#define RING_STABLE_MIN      5   /* 突变前最少稳定行数 */
-#define RING_ROAD_AHEAD_MIN  3   /* 突变后最少有路行数 */
-#define RING_SCAN_Y_NEAR     (MT9V034_HEIGHT - 8)    /* 扫描起点(近行) 112 */
-#define RING_SCAN_Y_FAR      (MT9V034_HEIGHT / 5)    /* 扫描终点(远行) 24 */
-#define RING_NEAR_SEARCH     8   /* 近行丢线时向上搜索双边行的最大行数 */
-
-/* 逐行扫描找边界突变, 返回 0=无突变 1=左环岛 2=右环岛 */
-static uint8_t scan_ring_jump(void)
-{
-    uint16_t y;
-    uint16_t start_y;
-    int16_t l_prev, r_prev, l_cur, r_cur;
-    int16_t dl, dr;
-    uint8_t stable_cnt;
-    uint8_t jump_side;
-    uint16_t jump_y;
-    uint8_t road_cnt;
-    int16_t center;
-    uint8_t found;
-    uint8_t left_lost, right_lost;
-
-    /* 0. 找第一个双边可见行 */
-    start_y = (uint16_t)RING_SCAN_Y_NEAR;
-    l_prev = g_track.left[start_y];
-    r_prev = g_track.right[start_y];
-    if (l_prev <= 2 || r_prev >= (int16_t)(MT9V034_WIDTH - 4))
-    {
-        found = 0;
-        for (y = (uint16_t)(RING_SCAN_Y_NEAR - 1);
-             y > (uint16_t)(RING_SCAN_Y_NEAR - RING_NEAR_SEARCH); y--)
-        {
-            l_cur = g_track.left[y];
-            r_cur = g_track.right[y];
-            if (l_cur > 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
-            {
-                start_y = y;
-                l_prev = l_cur;
-                r_prev = r_cur;
-                found = 1;
-                break;
-            }
-        }
-        if (!found)
-            return 0;
-    }
-
-    stable_cnt = 0;
-    jump_side = 0;
-    jump_y = 0;
-
-    for (y = start_y - 1; y > (uint16_t)RING_SCAN_Y_FAR; y--)
-    {
-        l_cur = g_track.left[y];
-        r_cur = g_track.right[y];
-        dl = l_cur - l_prev;
-        dr = r_cur - r_prev;
-
-        left_lost  = (l_cur <= 2) ? 1 : 0;
-        right_lost = (r_cur >= (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
-
-        if (left_lost || right_lost)
-        {
-            /* 单侧丢线 — 可能是环岛跳变 (边界突然刺入画面) */
-            if (stable_cnt >= RING_STABLE_MIN && jump_side == 0)
-            {
-                if (left_lost && !right_lost)
-                {
-                    if (dl < -(int16_t)RING_SUDDEN_TH &&
-                        dr > -(int16_t)RING_STABLE_TH && dr < (int16_t)RING_STABLE_TH)
-                    {
-                        jump_side = 1;  /* 左边界跳变 → 左环岛 */
-                        jump_y = y;
-                    }
-                }
-                else if (right_lost && !left_lost)
-                {
-                    if (dr > (int16_t)RING_SUDDEN_TH &&
-                        dl > -(int16_t)RING_STABLE_TH && dl < (int16_t)RING_STABLE_TH)
-                    {
-                        jump_side = 2;  /* 右边界跳变 → 右环岛 */
-                        jump_y = y;
-                    }
-                }
-            }
-
-            stable_cnt = 0;
-            l_prev = l_cur;
-            r_prev = r_cur;
-            continue;
-        }
-
-        /* 双边可见行 */
-        if (jump_side == 0)
-        {
-            if (dl > -(int16_t)RING_STABLE_TH && dl < (int16_t)RING_STABLE_TH &&
-                dr > -(int16_t)RING_STABLE_TH && dr < (int16_t)RING_STABLE_TH)
-            {
-                stable_cnt++;
-            }
-            else if (stable_cnt >= RING_STABLE_MIN)
-            {
-                /* 稳定段后在双边范围内出现跳变 (带上限防追踪伪影) */
-                if (dl < -(int16_t)RING_SUDDEN_TH && dl > -(int16_t)RING_SUDDEN_MAX &&
-                    dr > -(int16_t)RING_STABLE_TH && dr < (int16_t)RING_STABLE_TH)
-                {
-                    jump_side = 1;  /* 左边界向外跳 → 左环岛 */
-                    jump_y = y;
-                }
-                else if (dr > (int16_t)RING_SUDDEN_TH && dr < (int16_t)RING_SUDDEN_MAX &&
-                         dl > -(int16_t)RING_STABLE_TH && dl < (int16_t)RING_STABLE_TH)
-                {
-                    jump_side = 2;  /* 右边界向外跳 → 右环岛 */
-                    jump_y = y;
-                }
-                else
-                {
-                    stable_cnt = 0;
-                }
-            }
-            else
-            {
-                stable_cnt = 0;
-            }
-        }
-
-        l_prev = l_cur;
-        r_prev = r_cur;
-    }
-
-    if (jump_side == 0)
-        return 0;
-
-    /* 2. 检查跳变上方是否有路 (允许单侧可见 — 环岛入口特征) */
-    road_cnt = 0;
-    for (y = jump_y; y > (uint16_t)RING_SCAN_Y_FAR && y > 0; y--)
-    {
-        l_cur = g_track.left[y];
-        r_cur = g_track.right[y];
-        if (l_cur > 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
-        {
-            center = (l_cur + r_cur) / 2;
-            if (center > (int16_t)(CENTER_POINT - 25) && center < (int16_t)(CENTER_POINT + 25))
-            {
-                road_cnt++;
-                if (road_cnt >= RING_ROAD_AHEAD_MIN)
-                    return jump_side;
-            }
-        }
-        else if (l_cur > 2 && r_cur >= (int16_t)(MT9V034_WIDTH - 4))
-        {
-            /* 只有左边界 — 估计中线=左边界+半道宽(~30) */
-            center = l_cur + 30;
-            if (center > (int16_t)(CENTER_POINT - 25) && center < (int16_t)(CENTER_POINT + 25))
-            {
-                road_cnt++;
-                if (road_cnt >= RING_ROAD_AHEAD_MIN)
-                    return jump_side;
-            }
-        }
-        else if (l_cur <= 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
-        {
-            /* 只有右边界 — 估计中线=右边界-半道宽(~30) */
-            center = r_cur - 30;
-            if (center > (int16_t)(CENTER_POINT - 25) && center < (int16_t)(CENTER_POINT + 25))
-            {
-                road_cnt++;
-                if (road_cnt >= RING_ROAD_AHEAD_MIN)
-                    return jump_side;
-            }
-        }
-    }
-
-    return 0;
-}
-
-/* 检测环岛出口: 边界突变消失 → 环岛结束 */
-static uint8_t detect_ring_exit(void)
-{
-    return (scan_ring_jump() == 0) ? 1 : 0;
-}
-/* ================================================================
  * 第 8 节 — 行类型分类与分段合并
  *
  * 逐行计算 dl/dr/dw (边界变化量 + 宽度变化量), 将每行分为 7 种类型,
  * 合并连续同类型行为段, 用段序列代替双行固定行比较来识别元素。
  *
- * 三遍管线:
- *   row_classify_basic()  — 第一遍: 按边界存在性做基础分类
- *   row_classify_refine() — 第二遍: dl/dr/dw 状态机细化 (突变/超宽/发散)
- *   segment_merge()       — 第三遍: 连续同类型行合并为段, 相邻同类段再合并
+ * 两遍管线:
+ *   row_classify_refine() — 第一遍: 基础分类内联 + dl/dr/dw 状态机细化 (突变/超宽)
+ *   segment_merge()       — 第二遍: 连续同类型行合并为段, 相邻同类段再合并
  *
  * 行类型:
  *   -1 无效行    0 双边可见    1 左边界丢失   2 右边界丢失
@@ -682,8 +487,8 @@ static uint8_t detect_ring_exit(void)
  * 段序列 → 元素 (detect_element_segment):
  *   [0]           → STRAIGHT       直道
  *   [0, 3]        → CROSS          直道 → 超宽 = 十字路口
- *   [0, 1]        → RIGHT_ANGLE_r  左边界丢 → 路向右转
- *   [0, 2]        → RIGHT_ANGLE_l  右边界丢 → 路向左转
+ *   [0, 1]        → RIGHT_ANGLE_l  左边界丢 → 路向左转
+ *   [0, 2]        → RIGHT_ANGLE_r  右边界丢 → 路向右转
  *   [0, 5]        → STRAIGHT       突变 → 留给 detect_ring 确认环岛
  *   [0, 6]        → STRAIGHT       突变 → 留给 detect_ring 确认环岛
  *   [3] or [3,0]  → CROSS          超宽段 = 十字路口
@@ -691,158 +496,30 @@ static uint8_t detect_ring_exit(void)
  * ================================================================ */
 
 /* 行类型常量 */
-#define ROW_INVALID     (-1)
-#define ROW_BOTH         0
-#define ROW_LEFT_LOST    1
-#define ROW_RIGHT_LOST   2
-#define ROW_WIDE         3
-#define ROW_DIVERGE      4
-#define ROW_LEFT_JUMP    5
-#define ROW_RIGHT_JUMP   6
+#define ROW_INVALID (-1)
+#define ROW_BOTH 0
+#define ROW_LEFT_LOST 1
+#define ROW_RIGHT_LOST 2
+#define ROW_WIDE 3
+#define ROW_DIVERGE 4
+#define ROW_LEFT_JUMP 5
+#define ROW_RIGHT_JUMP 6
 
 /* 分段参数: 最小段长度=7行, 扫描范围 118→24 行 */
-#define ROW_CLASSIFY_START  (MT9V034_HEIGHT - 2)   /* 118, 从底部倒数第二行开始 */
-#define ROW_CLASSIFY_END    (MT9V034_HEIGHT / 5)   /* 24 */
-#define SEGMENT_MIN_LEN     7
-#define SEGMENT_MAX         12
+#define ROW_CLASSIFY_START (MT9V034_HEIGHT - 2) /* 118, 从底部倒数第二行开始 */
+#define ROW_CLASSIFY_END (MT9V034_HEIGHT / 5)   /* 24 */
+#define SEGMENT_MIN_LEN 7
 
 /* 逐行类型 (xdata) */
-static int8_t  g_row_flag[MT9V034_HEIGHT];
+static int8_t g_row_flag[MT9V034_HEIGHT];
 
-/* 分段信息 */
-static int8_t  g_seg_type[SEGMENT_MAX];
-static uint8_t g_seg_start[SEGMENT_MAX];  /* 远行(小行号) */
-static uint8_t g_seg_end[SEGMENT_MAX];    /* 近行(大行号) */
-static uint8_t g_seg_num;
+/* 分段信息 (非 static: 供 ring_fsm.c 读取) */
+int8_t g_seg_type[SEGMENT_MAX];
+uint8_t g_seg_start[SEGMENT_MAX];
+uint8_t g_seg_end[SEGMENT_MAX];
+uint8_t g_seg_num;
 
-/* 从段序列检测环岛: BOTH→单侧丢线(分叉) + 上方有路且非超宽 → 环岛
-   不再依赖逐行边界突变扫描 (真实图片边界过渡平缓, dl 达不到 10)。
-   段序列已明确告知"道路分叉", 直接以此为环岛信号。 */
-static TRACK_ELEMENT detect_ring_from_segments(void)
-{
-    int8_t s0_type;
-    int8_t s1_type;
-    uint8_t both_len;
-    uint8_t fork_y;
-    uint8_t ring_dir;
-    uint8_t road_cnt;
-    uint16_t y;
-    int16_t l_cur;
-    int16_t r_cur;
-    int16_t center;
-
-    if (g_seg_num < 2)
-        return NONE;
-
-    s0_type = g_seg_type[0];
-    s1_type = g_seg_type[1];
-
-    /* 必须有 BOTH 段打底 (近处正常道路), 且至少 10 行 */
-    if (s0_type != ROW_BOTH)
-        return NONE;
-    both_len = g_seg_start[0] - g_seg_end[0] + 1;
-    if (both_len < 10)
-        return NONE;
-
-    /* 判断分叉方向 */
-    if (s1_type == ROW_LEFT_LOST)
-        ring_dir = RING_l;
-    else if (s1_type == ROW_RIGHT_LOST)
-        ring_dir = RING_r;
-    else if (s1_type == ROW_LEFT_JUMP)
-        ring_dir = RING_l;
-    else if (s1_type == ROW_RIGHT_JUMP)
-        ring_dir = RING_r;
-    else
-        return NONE;
-
-    /* 排除十字: s2 是超宽段 → 十字路口, 不是环岛 */
-    if (g_seg_num >= 3)
-    {
-        if (g_seg_type[2] == ROW_WIDE)
-            return NONE;
-    }
-
-    /* 检查分叉上方是否有路 (≥3 行道路可见, 中线不偏太远) */
-    fork_y = g_seg_start[1];
-    road_cnt = 0;
-    for (y = (uint16_t)fork_y; y > (uint16_t)RING_SCAN_Y_FAR; y--)
-    {
-        l_cur = g_track.left[y];
-        r_cur = g_track.right[y];
-        if (l_cur > 2 || r_cur < (int16_t)(MT9V034_WIDTH - 4))
-        {
-            if (l_cur > 2 && r_cur < (int16_t)(MT9V034_WIDTH - 4))
-            {
-                center = (l_cur + r_cur) / 2;
-            }
-            else if (l_cur > 2)
-            {
-                center = l_cur + 30;
-            }
-            else
-            {
-                center = r_cur - 30;
-            }
-            if (abs(center - (int16_t)CENTER_POINT) < 30)
-            {
-                road_cnt++;
-                if (road_cnt >= RING_ROAD_AHEAD_MIN)
-                    return (TRACK_ELEMENT)ring_dir;
-            }
-        }
-    }
-
-    return NONE;
-}
-
-/* 检测环岛入口: 段分叉优先 (适应真实照片), 边界突变扫描兜底 */
-static TRACK_ELEMENT detect_ring(void)
-{
-    TRACK_ELEMENT result;
-    uint8_t jump_result;
-
-    /* 优先用段分叉检测 (不依赖边界突变阈值, 真实照片可用) */
-    result = detect_ring_from_segments();
-    if (result != NONE)
-        return result;
-
-    /* 兜底: 边界突变扫描 (合成图/极端场景) */
-    jump_result = scan_ring_jump();
-    if (jump_result == 1) return RING_l;
-    if (jump_result == 2) return RING_r;
-    return NONE;
-}
-
-/* ---------- 第一遍: 根据边界存在性做基础分类 ---------- */
-static void row_classify_basic(void)
-{
-    uint16_t y;
-    int16_t l, r;
-
-    for (y = 0; y < MT9V034_HEIGHT; y++)
-    {
-        l = g_track.left[y];
-        r = g_track.right[y];
-
-        if (l < 0 || r < 0)
-        {
-            g_row_flag[y] = ROW_INVALID;
-            continue;
-        }
-
-        if (l <= 2 && r >= (int16_t)(MT9V034_WIDTH - 4))
-            g_row_flag[y] = ROW_WIDE;
-        else if (l <= 2)
-            g_row_flag[y] = ROW_LEFT_LOST;
-        else if (r >= (int16_t)(MT9V034_WIDTH - 4))
-            g_row_flag[y] = ROW_RIGHT_LOST;
-        else
-            g_row_flag[y] = ROW_BOTH;
-    }
-}
-
-/* ---------- 第二遍: dl/dr/dw 细化分类 (突变检测 + 发散检测) ---------- */
+/* ---------- 单遍: 基础分类 + dl/dr/dw 细化 (合并原 row_classify_basic + row_classify_refine) ---------- */
 static void row_classify_refine(void)
 {
     uint16_t y;
@@ -850,7 +527,7 @@ static void row_classify_refine(void)
     int16_t dl, dr, dw, w_cur, w_prev;
     int16_t w_min;
     uint8_t flag_sud;
-    int8_t prev_flag;
+    int8_t basic_type;
 
     w_min = 65;
     flag_sud = 0;
@@ -860,12 +537,29 @@ static void row_classify_refine(void)
 
     for (y = (uint16_t)ROW_CLASSIFY_START; y > (uint16_t)ROW_CLASSIFY_END; y--)
     {
-        if (g_row_flag[y] == ROW_INVALID)
-            continue;
-
         l_cur = g_track.left[y];
         r_cur = g_track.right[y];
 
+        /* ---- 内联基础分类 (原 row_classify_basic) ---- */
+        if (l_cur < 0 || r_cur < 0)
+        {
+            g_row_flag[y] = ROW_INVALID;
+            l_prev = l_cur;
+            r_prev = r_cur;
+            continue;
+        }
+
+        if (l_cur <= 2 && r_cur >= (int16_t)(MT9V034_WIDTH - 4))
+            basic_type = ROW_WIDE;
+        else if (l_cur <= 2)
+            basic_type = ROW_LEFT_LOST;
+        else if (r_cur >= (int16_t)(MT9V034_WIDTH - 4))
+            basic_type = ROW_RIGHT_LOST;
+        else
+            basic_type = ROW_BOTH;
+        g_row_flag[y] = basic_type;
+
+        /* ---- 跳变/增量检测: 当前和上一行都必须是双边 ---- */
         if (l_prev <= 2 || r_prev >= (int16_t)(MT9V034_WIDTH - 4))
         {
             l_prev = l_cur;
@@ -884,7 +578,6 @@ static void row_classify_refine(void)
         dw = w_cur - w_prev;
         dl = l_cur - l_prev;
         dr = r_cur - r_prev;
-        prev_flag = g_row_flag[y];
 
         /* 十字: 宽度暴涨 + 两边到边界 */
         if ((dw > 20 && dl < -10 && dr > 3) ||
@@ -894,9 +587,9 @@ static void row_classify_refine(void)
             flag_sud = 3;
         }
         /* 延续十字 */
-        else if (prev_flag == ROW_WIDE ||
-                 (prev_flag == ROW_LEFT_LOST && dr > 10 && flag_sud == 0) ||
-                 (prev_flag == ROW_RIGHT_LOST && dl < -10 && flag_sud == 0))
+        else if (basic_type == ROW_WIDE ||
+                 (basic_type == ROW_LEFT_LOST && dr > 10 && flag_sud == 0) ||
+                 (basic_type == ROW_RIGHT_LOST && dl < -10 && flag_sud == 0))
         {
             g_row_flag[y] = ROW_WIDE;
             flag_sud = 3;
@@ -944,16 +637,18 @@ static void row_classify_refine(void)
         /* 十字结束 */
         else if (flag_sud == 3 &&
                  (dr < -10 || dl > 10 || w_cur < w_min) &&
-                 g_row_flag[y] == ROW_BOTH)
+                 basic_type == ROW_BOTH)
         {
             flag_sud = 0;
         }
-        /* 边界发散: dw>0 但 dl/dr 很小 → 断桥 */
+        /* 边界发散: dw>0 但 dl/dr 很小 → 断桥 [本次比赛无断桥, 已注释] */
+        /*
         else if (dl <= 0 && dl >= -10 && dr >= 0 && dr <= 10 &&
                  flag_sud == 0 && dw > 0)
         {
             g_row_flag[y] = ROW_DIVERGE;
         }
+        */
 
         l_prev = l_cur;
         r_prev = r_cur;
@@ -1049,14 +744,13 @@ static TRACK_ELEMENT detect_element_segment(void)
     uint8_t far_left_ok, far_right_ok;
     int16_t c_near, c_far, dx;
 
-    row_classify_basic();
-    row_classify_refine();
+    row_classify_refine(); /* 基础分类已内联, 单遍扫描完成 */
     segment_merge();
 
     n = g_seg_num;
 
     if (n == 0)
-        return BROKEN;
+        return NONE; /* 原 BROKEN → 本次比赛无断桥, 改 NONE */
 
     s0 = g_seg_type[0];
     s1 = (n >= 2) ? g_seg_type[1] : ROW_INVALID;
@@ -1067,13 +761,13 @@ static TRACK_ELEMENT detect_element_segment(void)
         if (s1 == ROW_WIDE)
             return CROSS;
         if (s1 == ROW_LEFT_JUMP || s1 == ROW_RIGHT_JUMP)
-            return STRAIGHT;  /* 突变 → 由 detect_ring 确认 */
+            return STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
         if (s1 == ROW_LEFT_LOST)
             return RIGHT_ANGLE_l;
         if (s1 == ROW_RIGHT_LOST)
             return RIGHT_ANGLE_r;
         if (s1 == ROW_DIVERGE)
-            return BROKEN;
+            return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
         /* s1 不显著 → 落到双行比较确认 (平滑弯道分段看不出) */
     }
     else if (s0 == ROW_WIDE)
@@ -1083,13 +777,13 @@ static TRACK_ELEMENT detect_element_segment(void)
     else if (s0 == ROW_RIGHT_LOST)
         return RIGHT_ANGLE_r;
     else if (s0 == ROW_DIVERGE)
-        return BROKEN;
+        return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
     else if (s0 == ROW_LEFT_JUMP || s0 == ROW_RIGHT_JUMP)
-        return STRAIGHT;  /* 突变 → 让 detect_ring 处理 */
+        return STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
 
-    /* ---- 双行比较 (分段无法判定时) ---- */
+    /* ---- 双行比较 (分段无法判定时, 远行上移提前判弯) ---- */
     near_y = (uint16_t)(MT9V034_HEIGHT - 20);
-    far_y = (uint16_t)VISION_LOOKAHEAD_Y;
+    far_y = (uint16_t)(MT9V034_HEIGHT / 2); /* y=60, 比默认85看得更远 */
 
     l_near = g_track.left[near_y];
     r_near = g_track.right[near_y];
@@ -1097,7 +791,7 @@ static TRACK_ELEMENT detect_element_segment(void)
     r_far = g_track.right[far_y];
 
     if (l_near < 0 || r_near < 0 || l_far < 0 || r_far < 0)
-        return BROKEN;
+        return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
 
     near_left_ok = (l_near > 2) ? 1 : 0;
     near_right_ok = (r_near < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
@@ -1105,7 +799,7 @@ static TRACK_ELEMENT detect_element_segment(void)
     far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
 
     if (!near_left_ok && !near_right_ok)
-        return BROKEN;
+        return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
 
     if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
     {
@@ -1117,12 +811,12 @@ static TRACK_ELEMENT detect_element_segment(void)
     {
         if (far_left_ok && !far_right_ok)
         {
-            if (l_far > 15)
+            if (l_far > 10)
                 return RIGHT_ANGLE_r;
         }
         if (!far_left_ok && far_right_ok)
         {
-            if (r_far < (int16_t)(MT9V034_WIDTH - 15))
+            if (r_far < (int16_t)(MT9V034_WIDTH - 10))
                 return RIGHT_ANGLE_l;
         }
         if (far_left_ok && far_right_ok)
@@ -1130,24 +824,242 @@ static TRACK_ELEMENT detect_element_segment(void)
             c_near = (l_near + r_near) / 2;
             c_far = (l_far + r_far) / 2;
             dx = c_far - c_near;
-            if (dx > 4)  return RIGHT_ANGLE_r;
-            if (dx < -4) return RIGHT_ANGLE_l;
+            if (dx > 5)
+                return RIGHT_ANGLE_r;
+            if (dx < -5)
+                return RIGHT_ANGLE_l;
         }
     }
     else if (near_left_ok && far_left_ok)
     {
         dx = l_far - l_near;
-        if (dx > 6)  return RIGHT_ANGLE_r;
-        if (dx < -6) return RIGHT_ANGLE_l;
+        if (dx > 5)
+            return RIGHT_ANGLE_r;
+        if (dx < -5)
+            return RIGHT_ANGLE_l;
     }
     else if (near_right_ok && far_right_ok)
     {
         dx = r_far - r_near;
-        if (dx > 6)  return RIGHT_ANGLE_r;
-        if (dx < -6) return RIGHT_ANGLE_l;
+        if (dx > 5)
+            return RIGHT_ANGLE_r;
+        if (dx < -5)
+            return RIGHT_ANGLE_l;
     }
 
     return STRAIGHT;
+}
+
+/* ================================================================
+ * 第 8.5 节 — 靶子检测 (独立于赛道元素分类)
+ *
+ * 使用原始灰度图 (绕过二值化滤波, 避免薄环被 Image_Filter 吃掉)
+ * 环壁=暗(≤100)→1, 赛道=亮(>100)→0, 模式: 0→1→0→1→0
+ * 三段验证: 逐行5段收集 → 候选行计数 → 圆形几何校验
+ * ================================================================ */
+#define TARGET_GRAY_THRESH    100   /* 灰度阈值: ≤暗(环壁), >亮(赛道) */
+#define TARGET_SCAN_Y_START   ((uint16_t)(MT9V034_HEIGHT - 25)) /* 95 */
+#define TARGET_SCAN_Y_END     ((uint16_t)(MT9V034_HEIGHT / 4))   /* 30 */
+#define TARGET_MIN_TRACK_W    50
+#define TARGET_WALL_MIN       2
+#define TARGET_WALL_MAX       15
+#define TARGET_INNER_MIN      15
+#define TARGET_INNER_MAX      100
+#define TARGET_MIN_ROWS       8
+#define TARGET_CX_SPREAD_MAX  15
+#define TARGET_WALL_SPREAD    6
+#define TARGET_MAX_CAND       32
+
+static uint8_t detect_target(void)
+{
+    static uint8_t cand_cx[TARGET_MAX_CAND];
+    static uint8_t cand_iw[TARGET_MAX_CAND];
+    static uint8_t cand_lw[TARGET_MAX_CAND];
+    static uint8_t cand_rw[TARGET_MAX_CAND];
+    static uint8_t cand_y[TARGET_MAX_CAND];
+    uint8_t cand_cnt;
+    uint16_t y;
+    int16_t l_bound;
+    int16_t r_bound;
+    uint16_t track_w;
+    uint16_t x;
+    uint8_t seg_val[6];
+    uint8_t seg_start[6];
+    uint8_t seg_end[6];
+    uint8_t seg_cnt;
+    uint8_t in_seg;
+    uint8_t pix;
+    uint8_t cur_val;
+    uint8_t lw;
+    uint8_t iw;
+    uint8_t rw;
+    uint8_t cx;
+    uint8_t i;
+    uint8_t cx_min;
+    uint8_t cx_max;
+    uint8_t iw_min;
+    uint8_t iw_max;
+    uint8_t iw_max_idx;
+    uint8_t lw_min;
+    uint8_t lw_max;
+    uint8_t rw_min;
+    uint8_t rw_max;
+    uint8_t j;
+    uint8_t tmp;
+
+    cand_cnt = 0;
+
+    /* 第一段: 逐行5段模式收集 (底→顶) */
+    for (y = TARGET_SCAN_Y_START; y > TARGET_SCAN_Y_END; y--)
+    {
+        l_bound = g_track.left[y];
+        r_bound = g_track.right[y];
+        if (l_bound < 2 || r_bound >= (int16_t)(MT9V034_WIDTH - 4))
+            continue;
+
+        track_w = (uint16_t)(r_bound - l_bound + 1);
+        if (track_w < TARGET_MIN_TRACK_W)
+            continue;
+
+        /* 在赛道边界内扫描, 分割连续同色段 */
+        seg_cnt = 0;
+        in_seg = 0;
+
+        for (x = (uint16_t)(l_bound + 2); x <= (uint16_t)(r_bound - 2); x++)
+        {
+            pix = mt9v034_image[y][x];
+            cur_val = (pix <= TARGET_GRAY_THRESH) ? 1 : 0;
+
+            if (!in_seg)
+            {
+                if (seg_cnt >= 6)
+                    break;
+                seg_val[seg_cnt] = cur_val;
+                seg_start[seg_cnt] = (uint8_t)x;
+                in_seg = 1;
+            }
+            else if (cur_val != seg_val[seg_cnt])
+            {
+                seg_end[seg_cnt] = (uint8_t)(x - 1);
+                seg_cnt++;
+                if (seg_cnt >= 6)
+                    break;
+                seg_val[seg_cnt] = cur_val;
+                seg_start[seg_cnt] = (uint8_t)x;
+            }
+        }
+        if (in_seg && seg_cnt < 6)
+        {
+            seg_end[seg_cnt] = (uint8_t)(r_bound - 2);
+            seg_cnt++;
+        }
+
+        /* 必须恰好5段: 0→1→0→1→0 */
+        if (seg_cnt != 5)
+            continue;
+        if (seg_val[0] != 0 || seg_val[1] != 1 ||
+            seg_val[2] != 0 || seg_val[3] != 1 ||
+            seg_val[4] != 0)
+            continue;
+
+        lw = seg_end[1] - seg_start[1] + 1;
+        iw = seg_end[2] - seg_start[2] + 1;
+        rw = seg_end[3] - seg_start[3] + 1;
+
+        if (lw < TARGET_WALL_MIN || lw > TARGET_WALL_MAX)
+            continue;
+        if (rw < TARGET_WALL_MIN || rw > TARGET_WALL_MAX)
+            continue;
+        if (iw < TARGET_INNER_MIN || iw > TARGET_INNER_MAX)
+            continue;
+
+        cx = (seg_start[2] + seg_end[2]) / 2;
+
+        if (cand_cnt < TARGET_MAX_CAND)
+        {
+            cand_y[cand_cnt] = (uint8_t)y;
+            cand_cx[cand_cnt] = cx;
+            cand_iw[cand_cnt] = iw;
+            cand_lw[cand_cnt] = lw;
+            cand_rw[cand_cnt] = rw;
+            cand_cnt++;
+        }
+    }
+
+    /* 第二段: 候选行数检查 */
+    if (cand_cnt < TARGET_MIN_ROWS)
+        return 0;
+
+    /* 第三段-A: 中心 x 一致性 (圆环中心在竖直线上) */
+    cx_min = 255;
+    cx_max = 0;
+    for (i = 0; i < cand_cnt; i++)
+    {
+        if (cand_cx[i] < cx_min)
+            cx_min = cand_cx[i];
+        if (cand_cx[i] > cx_max)
+            cx_max = cand_cx[i];
+    }
+    if ((uint8_t)(cx_max - cx_min) >= TARGET_CX_SPREAD_MAX)
+        return 0;
+
+    /* 第三段-B: 内径弧线轮廓 (小→大→小, 最大值在中间) */
+    iw_min = 255;
+    iw_max = 0;
+    iw_max_idx = 0;
+    for (i = 0; i < cand_cnt; i++)
+    {
+        if (cand_iw[i] > iw_max)
+        {
+            iw_max = cand_iw[i];
+            iw_max_idx = i;
+        }
+        if (cand_iw[i] < iw_min)
+            iw_min = cand_iw[i];
+    }
+    if (iw_max_idx == 0 || iw_max_idx == (uint8_t)(cand_cnt - 1))
+        return 0;
+    if (iw_max < iw_min + iw_min / 2)
+        return 0;
+
+    /* 第三段-C: 壁宽一致性 (环壁厚度均匀) */
+    lw_min = 255;
+    lw_max = 0;
+    rw_min = 255;
+    rw_max = 0;
+    for (i = 0; i < cand_cnt; i++)
+    {
+        if (cand_lw[i] < lw_min)
+            lw_min = cand_lw[i];
+        if (cand_lw[i] > lw_max)
+            lw_max = cand_lw[i];
+        if (cand_rw[i] < rw_min)
+            rw_min = cand_rw[i];
+        if (cand_rw[i] > rw_max)
+            rw_max = cand_rw[i];
+    }
+    if ((uint8_t)(lw_max - lw_min) > TARGET_WALL_SPREAD)
+        return 0;
+    if ((uint8_t)(rw_max - rw_min) > TARGET_WALL_SPREAD)
+        return 0;
+
+    /* 取中心 x 中位数 */
+    for (i = 0; i < cand_cnt; i++)
+    {
+        tmp = cand_cx[i];
+        j = i;
+        while (j > 0 && cand_cx[j - 1] > tmp)
+        {
+            cand_cx[j] = cand_cx[j - 1];
+            j--;
+        }
+        cand_cx[j] = tmp;
+    }
+
+    g_target_center_x = cand_cx[cand_cnt / 2];
+    g_target_radius = (uint8_t)(iw_max / 2); /* 内径的一半 ≈ 圆环半径 */
+    g_target_y_mid = cand_y[iw_max_idx];     /* 内径最大处的行号 ≈ 圆环中心 y */
+    return 1;
 }
 
 /* ================================================================
@@ -1157,74 +1069,38 @@ static TRACK_ELEMENT detect_element_segment(void)
  * detect_element_segment() — 行分类 + 分段合并 + 段序列 → 元素
  * ================================================================ */
 
-/* 主分类入口: 段分类先行 → 环岛状态保持 → 环岛入口确认 → 十字回退
+/* 主分类入口: 段分类 → 环岛状态机 → 十字回退
 
-   环岛生命周期 (以左环岛为例):
-     入环: 左侧边界鼓出 → 段分叉 BOTH→LEFT_LOST → RING_l (PLAN_TURN_LEFT)
-     环中: 分叉消失, 左侧持续丢线 (岛体遮挡) → 转过阈值角度后 RING_c (PLAN_STRAIGHT)
-     出环: 右侧出现分叉 (路汇合) → STRAIGHT
-
-     右环岛镜像: 入环=RIGHT_LOST分叉, 出环=LEFT_LOST分叉 */
+   环岛检测由 ring_fsm 封装:
+     - 条件1(边界终点) + 条件2(上方有路) 同时成立才确认环岛
+     - 状态保持 + 入口/出口/中心转换 全在 ring_fsm 内部管理 */
 TRACK_ELEMENT track_element_judge(void)
 {
     TRACK_ELEMENT seg_elem;
-    TRACK_ELEMENT ring_check;
 
     if (!g_track_valid)
+    {
+        ring_fsm_reset(&g_ring_fsm);
         return NONE;
+    }
 
-    /* 视觉层特征标志 */
     if (g_track.feature == VISION_FEATURE_LOST)
-        return BROKEN;
+        return NONE; /* 原 BROKEN → 本次比赛无断桥, 改 NONE */
 
-    /* 先跑段分类 (环岛入口/出口都依赖段信息) */
     seg_elem = detect_element_segment();
 
-    /* ---- 环岛状态保持 ----
-       入环后分叉会消失 (岛体遮挡近处一侧边界变成单边丢线),
-       此时不能出环岛。出环岛的信号是另一侧出现分叉。 */
-    if (g_track_fsm.state == RING_l)
-    {
-        /* 右侧出现分叉 → 左环岛出口 (路汇合) */
-        ring_check = detect_ring_from_segments();
-        if (ring_check == RING_r)
-            return STRAIGHT;
-        /* 转过阈值角度 → 环岛中心 (直行规划) */
-        if (cnt_degree >= RING_CENTER_DEGREE)
-            return RING_c;
-        return RING_l;
-    }
-    if (g_track_fsm.state == RING_r)
-    {
-        /* 左侧出现分叉 → 右环岛出口 (路汇合) */
-        ring_check = detect_ring_from_segments();
-        if (ring_check == RING_l)
-            return STRAIGHT;
-        if (cnt_degree >= RING_CENTER_DEGREE)
-            return RING_c;
-        return RING_r;
-    }
-    if (g_track_fsm.state == RING_c)
-    {
-        /* 环岛中心: 任一侧出现分叉 → 出环岛 */
-        ring_check = detect_ring_from_segments();
-        if (ring_check != NONE)
-            return STRAIGHT;
-        return RING_c;
-    }
+    /* 环岛状态机: 处理入口/保持/出口, 返回 RING_x 或透传 seg_elem
+       条件1(边界终点) + 条件2(上方有路) 在 ring_fsm 内部同时验证 */
+    seg_elem = ring_fsm_process(&g_ring_fsm, seg_elem);
 
-    /* ---- 进环岛: segment 像转弯, 但段序列有分叉+上方有路 → 环岛入口 ---- */
-    if (seg_elem == STRAIGHT || seg_elem == RIGHT_ANGLE_l || seg_elem == RIGHT_ANGLE_r)
-    {
-        ring_check = detect_ring();
-        if (ring_check != NONE)
-            return ring_check;
-    }
+    /* 环岛元素直接返回, 不经过十字回退 */
+    if (seg_elem == RING_l || seg_elem == RING_r || seg_elem == RING_c)
+        return seg_elem;
 
     if (seg_elem != STRAIGHT)
         return seg_elem;
 
-    /* 回退: 宽度法十字检测 (不再盲信视觉层 VISION_FEATURE_CROSS, 宽弯道会误触发) */
+    /* 回退: 宽度法十字检测 */
     if (detect_cross_scene())
         return CROSS;
 
@@ -1267,11 +1143,11 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
     uint16_t far_y;
     uint8_t far_left_ok, far_right_ok;
 
-    far_y = (uint16_t)VISION_LOOKAHEAD_Y;
+    far_y = (uint16_t)(MT9V034_HEIGHT / 2); /* y=60, 同 straight 远行避免 target 回跳 */
     l_far = g_track.left[far_y];
     r_far = g_track.right[far_y];
 
-    far_left_ok  = (l_far > 2) ? 1 : 0;
+    far_left_ok = (l_far > 2) ? 1 : 0;
     far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
 
     /* 双边丢线: 保持上一帧目标 */
@@ -1292,12 +1168,14 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
         }
         else
         {
-            lane_w = 65;
+            lane_w = 85;
         }
     }
-    /* TODO: 道宽范围, 根据实际赛道在图像中的像素宽调整 (兜底值=65) */
-    if (lane_w < 25) lane_w = 65;
-    if (lane_w > 160) lane_w = 160;
+    /* 道宽范围: 竞赛赛道在图像中约 70~100px */
+    if (lane_w < 50)
+        lane_w = 85;
+    if (lane_w > 160)
+        lane_w = 160;
 
     /* 十字路口: 双边都在边界 → 保持中心 */
     if (l_far <= 5 && r_far >= (int16_t)(MT9V034_WIDTH - 5))
@@ -1329,45 +1207,6 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
     return clamp_center_to_target(target);
 }
 
-/* 环岛入口规划: 目标点选在环岛侧的边界上 (左环岛跟左边界, 右环岛跟右边界)
-   入环时视觉前方可能是直道, 但车应该跟随鼓出的那一侧边界进入环岛 */
-static uint8_t plan_ring_entry(TRACK_ELEMENT ring_type)
-{
-    int16_t l_far, r_far;
-    int16_t target;
-    uint16_t far_y;
-
-    far_y = (uint16_t)VISION_LOOKAHEAD_Y;
-    l_far = g_track.left[far_y];
-    r_far = g_track.right[far_y];
-
-    if (ring_type == RING_l)
-    {
-        /* 左环岛: 跟左边界 (环岛鼓出侧) */
-        if (l_far > 2)
-            target = l_far + 30;
-        else
-            target = (int16_t)CENTER_POINT - 30;
-    }
-    else
-    {
-        /* 右环岛: 跟右边界 (环岛鼓出侧) */
-        if (r_far < (int16_t)(MT9V034_WIDTH - 4))
-            target = r_far - 30;
-        else
-            target = (int16_t)CENTER_POINT + 30;
-    }
-
-    return clamp_center_to_target(target);
-}
-
-/* 环岛中心/出口规划: 上边界 (图像中心) 作为终点, 直行向上, 忽略单侧丢线的转弯假象 */
-static uint8_t plan_ring_center(void)
-{
-    return (uint8_t)CENTER_POINT;
-}
-
-
 /* 纯追踪: 速度 → 前瞻距离 → 中线点集最近点 → 转向角 */
 static void plan_pure_pursuit(float current_speed)
 {
@@ -1381,13 +1220,6 @@ static void plan_pure_pursuit(float current_speed)
 
     pp_lookahead_dist = lp;
     pp_steering_angle = pure_pursuit_angle(&g_track, lp);
-}
-
-void track_straight_target(uint8_t position)
-{
-    (void)position;
-    straight_target = plan_straight_center();
-    track_midpoint_target = straight_target;
 }
 
 /* ================================================================
@@ -1418,7 +1250,10 @@ static void vofa_send_firewater(void)
     fvals[6] = (float)g_track.left_bev_step;
     fvals[7] = (float)g_track.right_bev_step;
     fvals[8] = (float)g_track.mid_step;
-    fvals[9] = (float)track_element;
+    if (g_target_detected)
+        fvals[9] = (float)((int16_t)g_target_center_x + 256);
+    else
+        fvals[9] = (float)track_element;
 
     for (i = 0; i < VOFA_FLOAT_COUNT; i++)
     {
@@ -1457,8 +1292,8 @@ static void trail_fsm_on_entry(TRACK_ELEMENT state)
     pid_pos.integral = 0.0f;
     pid_gyro.integral = 0.0f;
 
-    /* 锁定航向: 直道保持姿态, 断桥保持冲出方向 */
-    if (state == STRAIGHT || state == BROKEN_RODE)
+    /* 锁定航向: 直道保持姿态 [BROKEN_RODE 已注释, 本次比赛无断桥] */
+    if (state == STRAIGHT)
     {
         gyro_target = yaw;
     }
@@ -1471,22 +1306,16 @@ static void trail_fsm_on_entry(TRACK_ELEMENT state)
     {
         g_track_fsm.state_hold = 6;
     }
+    /* [本次比赛无断桥, broken_flag_clear 已注释]
     if (state == STRAIGHT)
     {
         broken_flag_clear();
     }
-    /* 环岛: 清零断桥累积 + 启动陀螺仪积分追踪转角 */
     if (state == RING_l || state == RING_r || state == RING_c)
     {
         broken_flag_clear();
-        cnt_degree = 0;
-        ring_start_yaw = yaw;
     }
-}
-
-static void trail_fsm_on_exit(TRACK_ELEMENT state)
-{
-    (void)state;
+    */
 }
 
 /* ================================================================
@@ -1518,7 +1347,8 @@ void track_handle(void)
     if (!fsm_inited)
     {
         track_fsm_init(&g_track_fsm);
-        track_fsm_set_callbacks(&g_track_fsm, trail_fsm_on_entry, trail_fsm_on_exit);
+        track_fsm_set_callbacks(&g_track_fsm, trail_fsm_on_entry, 0);
+        ring_fsm_init(&g_ring_fsm);
         fsm_inited = 1;
     }
 
@@ -1534,40 +1364,52 @@ void track_handle(void)
     track_midpoint_target_P = track_midpoint_target;
     current_element = track_element_judge();
     raw_elem = current_element;
+
+#if TRAIL_DBG_PRINTF
     cross_cnt = count_cross_rows(&g_track);
     break_row = detect_cross_break_row();
+#endif
 
-    // 计算纯追踪与曲率 (供速度决策)
+#if VISION_USE_PURE_PURSUIT || VOFA_FIREWATER
+    // 计算纯追踪与曲率 (供速度决策或调试)
     speed_est = 45.0f;
     plan_pure_pursuit(speed_est);
     pp_curvature = compute_road_curvature(&g_track);
+#endif
     pp_visible_high = g_track.visible_high;
 
-    // 断桥升级: 累积行驶距离超过阈值 → 进入断桥后阶段
+    // 断桥升级: 累积行驶距离超过阈值 → 进入断桥后阶段 [本次比赛无断桥, 已注释]
+    /*
     if (raw_elem == BROKEN)
     {
         if (broken_judged())
             raw_elem = BROKEN_RODE;
     }
+    */
 
     track_fsm_update(&g_track_fsm, raw_elem);
     track_element = g_track_fsm.state;
+
+    // 靶子检测 (独立于元素分类, 不修改 track_element, 每4帧跑一次)
+    {
+        static uint8_t target_skip = 0;
+        target_skip++;
+        if (target_skip >= 4)
+        {
+            uint8_t target_found;
+            target_skip = 0;
+            target_found = detect_target();
+            g_target_detected = target_found ? 1 : 0;
+        }
+    }
 
     // 目标规划 — 环岛状态用专用规划函数, 其他按 FSM plan 委派
     plan = track_fsm_get_plan(&g_track_fsm);
     new_target = track_midpoint_target_P;
 
-    if (track_element == RING_l)
+    if (track_element == RING_l || track_element == RING_r || track_element == RING_c)
     {
-        new_target = plan_ring_entry(RING_l);
-    }
-    else if (track_element == RING_r)
-    {
-        new_target = plan_ring_entry(RING_r);
-    }
-    else if (track_element == RING_c)
-    {
-        new_target = plan_ring_center();
+        new_target = ring_fsm_get_target(&g_ring_fsm);
     }
     else if (plan == PLAN_STRAIGHT)
     {
@@ -1590,8 +1432,15 @@ void track_handle(void)
     }
     /* PLAN_HOLD 和 PLAN_BROKEN: 保持上一帧目标 */
 
+    /* 靶子覆写: 检测到圆环时, 目标点指向环中心 */
+    if (g_target_detected)
+    {
+        new_target = g_target_center_x;
+    }
+
     // 后处理: 跳变限幅 ±12px + 逐状态 EMA 平滑
-    if (track_element != BROKEN_RODE && track_element != NONE &&
+    if (!g_target_detected &&
+        track_element != NONE &&
         track_element != RIGHT_ANGLE_l && track_element != RIGHT_ANGLE_r &&
         track_element != RING_l && track_element != RING_r)
     {
@@ -1614,7 +1463,7 @@ void track_handle(void)
     }
 
 #if TRAIL_DBG_PRINTF
-    printf("DBG feature:%d cross_cnt:%u break_row:%d valid_rows:%u center_x:%d element:%s target:%u pp_ang:%.1f\r\n",
+    printf("DBG feature:%d cross_cnt:%u break_row:%d valid_rows:%u center_x:%d element:%s target:%u tg_det:%u tg_cx:%u pp_ang:%.1f\r\n",
            g_track.feature,
            cross_cnt,
            break_row,
@@ -1622,6 +1471,8 @@ void track_handle(void)
            g_track.center_x,
            track_element_name(track_element),
            track_midpoint_target,
+           g_target_detected,
+           g_target_center_x,
            pp_steering_angle);
 #endif
 

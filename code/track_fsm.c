@@ -9,7 +9,7 @@
 //
 // 配置表字段 (track_fsm_cfg_t):
 //   Kp/Ki/Kd/integral_max  — 位置 PID (控制中线偏差 → 舵机)
-//   angle_kp/ki/kd/imax/w   — 角度 PID (控制赛道方向变化)
+//   angle_kp/ki/kd/imax/w   — 角度 PID (控制赛道方向变化 → 差速)
 //   ema_alpha               — 转向输出平滑系数 (越大越灵敏)
 //   plan                    — 目标规划策略 (PLAN_STRAIGHT/CROSS/...)
 //   speed_factor            — 速度倍率 (1.0=全速)
@@ -37,7 +37,7 @@ track_fsm_t g_track_fsm;
 /* ================================================================
  * 默认配置表 — 11 元素的 PID/EMA/规划/速度参数
  *
- * 字段顺序: Kp, Ki, Kd, imax, aKp, aKi, aKd, aImax, aW, EMA, plan, spd, db
+ * 字段顺序: Kp, Ki, Kd, imax, aKp, aKi, aKd, aImax, diff_str, EMA, plan, spd, db
  *
  * 调参指南:
  *   Kp ↑ → 转向更猛, 过大振荡
@@ -46,7 +46,7 @@ track_fsm_t g_track_fsm;
  *   ema_alpha ↑ → 响应更快, 但更不平滑
  *   speed_factor ↑ → 提速
  *   debounce_frames ↑ → 防误触发, 但响应变慢
- *   angle_weight ↑ → 角度环占比增加, 预判弯道更早
+ *   angle_weight ↑ → 差速增强, 转弯时内侧轮减速更多
  * ================================================================ */
 static const track_fsm_cfg_t s_default_cfg[TRACK_FSM_CFG_COUNT] =
 {
@@ -143,8 +143,18 @@ void track_fsm_update(track_fsm_t *fsm, TRACK_ELEMENT raw_elem)
 /* ================================================================
  * 参数查询 — 从当前状态的配置中取对应字段
  *
+ * track_fsm_get_cfg() 一步返指针, 替代多次 getter 调用。
  * 所有 getter 都有边界保护: 状态索引越界时返回安全默认值
  * ================================================================ */
+
+const track_fsm_cfg_t *track_fsm_get_cfg(const track_fsm_t *fsm)
+{
+    uint8_t idx;
+    idx = (uint8_t)fsm->state;
+    if (idx >= TRACK_FSM_CFG_COUNT)
+        idx = 2;  /* 越界回退 STRAIGHT */
+    return &fsm->cfg[idx];
+}
 
 float track_fsm_get_Kp(const track_fsm_t *fsm)
 {
