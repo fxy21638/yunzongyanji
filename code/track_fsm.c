@@ -9,7 +9,7 @@
 //
 // 配置表字段 (track_fsm_cfg_t):
 //   Kp/Ki/Kd/integral_max  — 位置 PID (控制中线偏差 → 舵机)
-//   angle_kp/ki/kd/imax/w   — 角度 PID (控制赛道方向变化)
+//   angle_kp/ki/kd/imax/w   — 角度 PID (控制赛道方向变化 → 差速)
 //   ema_alpha               — 转向输出平滑系数 (越大越灵敏)
 //   plan                    — 目标规划策略 (PLAN_STRAIGHT/CROSS/...)
 //   speed_factor            — 速度倍率 (1.0=全速)
@@ -37,7 +37,7 @@ track_fsm_t g_track_fsm;
 /* ================================================================
  * 默认配置表 — 11 元素的 PID/EMA/规划/速度参数
  *
- * 字段顺序: Kp, Ki, Kd, imax, aKp, aKi, aKd, aImax, aW, EMA, plan, spd, db
+ * 字段顺序: Kp, Ki, Kd, imax, aKp, aKi, aKd, aImax, diff_str, EMA, plan, spd, db
  *
  * 调参指南:
  *   Kp ↑ → 转向更猛, 过大振荡
@@ -46,7 +46,7 @@ track_fsm_t g_track_fsm;
  *   ema_alpha ↑ → 响应更快, 但更不平滑
  *   speed_factor ↑ → 提速
  *   debounce_frames ↑ → 防误触发, 但响应变慢
- *   angle_weight ↑ → 角度环占比增加, 预判弯道更早
+ *   angle_weight ↑ → 差速增强, 转弯时内侧轮减速更多
  * ================================================================ */
 static const track_fsm_cfg_t s_default_cfg[TRACK_FSM_CFG_COUNT] =
 {
@@ -54,11 +54,11 @@ static const track_fsm_cfg_t s_default_cfg[TRACK_FSM_CFG_COUNT] =
 	/* NONE 无效 */         {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.00f,0.80f, PLAN_HOLD,       0.0f, 1},
 	/* START 发车 */        {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.80f, PLAN_STRAIGHT,   0.50f,1},
 	/* STRAIGHT 直道 */     {0.30f,0.00f,0.08f,0.0f, 0.25f,0.02f,0.40f,2.0f, 0.15f,0.80f, PLAN_STRAIGHT,   1.0f, 3},
-	/* RIGHT_ANGLE_l 左弯 */{0.35f,0.00f,0.10f,0.0f, 0.40f,0.06f,0.50f,6.0f, 0.30f,0.72f,  PLAN_TURN_LEFT,  0.55f,5},
-	/* RIGHT_ANGLE_r 右弯 */{0.35f,0.00f,0.10f,0.0f, 0.40f,0.06f,0.50f,6.0f, 0.30f,0.72f, PLAN_TURN_RIGHT, 0.55f,5},
-	/* RING_l 左环岛 */     {0.42f,0.00f,0.30f,0.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_TURN_LEFT,  0.65f,1},
-	/* RING_r 右环岛 */     {0.42f,0.00f,0.30f,0.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_TURN_RIGHT, 0.65f,1},
-	/* RING_c 环岛中心 */   {0.42f,0.00f,0.30f,0.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,1},
+	/* RIGHT_ANGLE_l 左弯 */{0.35f,0.00f,0.10f,0.0f, 0.55f,0.06f,0.55f,6.0f, 0.40f,0.72f,  PLAN_TURN_LEFT,  0.55f,5},
+	/* RIGHT_ANGLE_r 右弯 */{0.35f,0.00f,0.10f,0.0f, 0.55f,0.06f,0.55f,6.0f, 0.40f,0.72f, PLAN_TURN_RIGHT, 0.55f,5},
+	/* RING_l 左环岛 */     {0.42f,0.00f,0.30f,0.0f, 0.45f,0.03f,0.50f,3.0f, 0.30f,0.80f, PLAN_TURN_LEFT,  0.65f,1},
+	/* RING_r 右环岛 */     {0.42f,0.00f,0.30f,0.0f, 0.45f,0.03f,0.50f,3.0f, 0.30f,0.80f, PLAN_TURN_RIGHT, 0.65f,1},
+	/* RING_c 环岛中心 */   {0.42f,0.00f,0.30f,0.0f, 0.45f,0.03f,0.50f,3.0f, 0.30f,0.80f, PLAN_STRAIGHT,   0.65f,1},
 	/* CROSS 十字路口 */    {0.35f,0.00f,0.25f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.85f, PLAN_CROSS,      0.75f,2},
 	/* BROKEN 断桥通过中 */ {0.25f,0.00f,0.15f,0.0f, 0.20f,0.00f,0.35f,0.0f, 0.05f,0.90f, PLAN_HOLD,       0.45f,3},
 	/* BROKEN_RODE 断桥后 */{1.00f,0.00f,2.00f,0.0f, 0.00f,0.00f,0.00f,0.0f, 0.00f,0.60f, PLAN_BROKEN,     0.50f,2}

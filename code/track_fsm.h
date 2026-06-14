@@ -28,12 +28,12 @@ typedef struct
     float    Kd;              /* 微分: 阻尼, 抑制振荡 */
     float    integral_max;    /* 积分限幅 */
 
-    /* 角度 PID — 赛道方向变化 → 预判弯道 (与位置环加权融合) */
+    /* 角度 PID — 赛道方向变化 → 差速辅助 (内侧轮减速) */
     float    angle_kp;        /* 角度环比例 */
     float    angle_ki;        /* 角度环积分 */
     float    angle_kd;        /* 角度环微分 */
     float    angle_imax;      /* 角度环积分限幅 */
-    float    angle_weight;    /* 角度环融合权重 (0.0~1.0), 越大角度环越强 */
+    float    angle_weight;    /* 差速辅助强度 (0.0~1.0), 越大差速越强 */
 
     /* 其他 */
     float    ema_alpha;       /* EMA 平滑系数: 0=完全平滑, 1=立即响应 */
@@ -79,7 +79,7 @@ float         track_fsm_get_angle_kp(const track_fsm_t *fsm);      /* 角度环�
 float         track_fsm_get_angle_ki(const track_fsm_t *fsm);      /* 角度环积分 */
 float         track_fsm_get_angle_kd(const track_fsm_t *fsm);      /* 角度环微分 */
 float         track_fsm_get_angle_imax(const track_fsm_t *fsm);    /* 角度环积分限幅 */
-float         track_fsm_get_angle_weight(const track_fsm_t *fsm);  /* 角度环融合权重 */
+float         track_fsm_get_angle_weight(const track_fsm_t *fsm);  /* 差速辅助强度 */
 float         track_fsm_get_speed_factor(const track_fsm_t *fsm);  /* 速度倍率 */
 track_plan_t  track_fsm_get_plan(const track_fsm_t *fsm);          /* 目标规划策略 */
 

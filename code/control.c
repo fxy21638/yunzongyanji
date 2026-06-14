@@ -23,7 +23,7 @@ float speed_base = 65;
 #define SPEED_ACCEL_MAX   1.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
 
 /* 差速辅助转向: 内侧轮减速比例 */
-#define DIFF_MAX_FACTOR   0.35f   /* 满舵时内侧轮减速 35% */
+#define DIFF_MAX_FACTOR   0.70f   /* 满角度差速时内侧轮减速上限 */
 #define DIFF_DEADZONE     2.0f    /* 死区: ±2° 内不启动差速 */
 
 /* 转向保护: 防突变 + 防长时间打死 */
@@ -277,7 +277,11 @@ void steering_control(void)
         float track_error;
         const track_fsm_cfg_t *cfg;
         float fsm_Kp, fsm_Kd, fsm_Ki, fsm_imax;
-        float fsm_angle_kp, fsm_angle_ki, fsm_angle_kd, fsm_angle_imax, fsm_angle_w;
+        float fsm_angle_kp, fsm_angle_ki, fsm_angle_kd, fsm_angle_imax;
+        float diff_strength;
+        float pos_out;
+        float ang_out;
+        float track_dx;
         float ema_alpha;
         float speed_scale;
         static float steer_smooth = 0.0f;
@@ -304,10 +308,6 @@ void steering_control(void)
     else
     */
     {
-        float pos_out;
-        float ang_out;
-        float track_dx;
-
         fsm_Kp = cfg->Kp;
         fsm_Kd = cfg->Kd;
         fsm_Ki = cfg->Ki;
@@ -316,7 +316,7 @@ void steering_control(void)
         fsm_angle_ki = cfg->angle_ki;
         fsm_angle_kd = cfg->angle_kd;
         fsm_angle_imax = cfg->angle_imax;
-        fsm_angle_w  = cfg->angle_weight;
+        diff_strength = cfg->angle_weight;  /* 差速辅助强度 0.0~1.0 */
 
         /* 速度自适应: 高速时略微增大转向增益 */
         {
@@ -373,36 +373,35 @@ void steering_control(void)
         ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
         ang_out = SATURATE(ang_out, -ANG_OUT_MAX, ANG_OUT_MAX);
 
-        steer_output = pos_out * (1.0f - fsm_angle_w)
-                     + ang_out * fsm_angle_w;
     }
 
-    steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
+    /* ---- 位置 PID 输出 → 舵机 (EMA/限幅/饱和保护) ---- */
+    pos_out = SATURATE(pos_out, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
 
-    steer_output = steer_smooth * (1.0f - cfg->ema_alpha) + steer_output * cfg->ema_alpha;
+    pos_out = steer_smooth * (1.0f - cfg->ema_alpha) + pos_out * cfg->ema_alpha;
 
     /* 变化率限制: 每帧最多变化 ±STEER_MAX_STEP 度, 防止突然打死 */
     {
         float steer_delta;
-        steer_delta = steer_output - steer_smooth;
+        steer_delta = pos_out - steer_smooth;
         if (steer_delta > STEER_MAX_STEP)
-            steer_output = steer_smooth + STEER_MAX_STEP;
+            pos_out = steer_smooth + STEER_MAX_STEP;
         else if (steer_delta < -STEER_MAX_STEP)
-            steer_output = steer_smooth - STEER_MAX_STEP;
+            pos_out = steer_smooth - STEER_MAX_STEP;
     }
-    steer_smooth = steer_output;
+    steer_smooth = pos_out;
 
     /* 饱和超时保护: 连续满舵超过阈值 → 逐步回中, 防止卡死 */
     {
         static uint8_t sat_cnt = 0;
-        float steer_abs;
-        steer_abs = (steer_output < 0.0f) ? -steer_output : steer_output;
-        if (steer_abs >= (STEER_OUTPUT_LIMIT - 0.5f))
+        float pos_abs;
+        pos_abs = (pos_out < 0.0f) ? -pos_out : pos_out;
+        if (pos_abs >= (STEER_OUTPUT_LIMIT - 0.5f))
         {
             sat_cnt++;
             if (sat_cnt > STEER_SAT_TIMEOUT)
             {
-                steer_output *= 0.7f;
+                pos_out *= 0.7f;
                 sat_cnt = STEER_SAT_TIMEOUT;
             }
         }
@@ -412,19 +411,20 @@ void steering_control(void)
         }
     }
 
-    servo_set_wheel_angle(steer_output);
+    servo_set_wheel_angle(pos_out);
 
-    /* 差速辅助: 内侧轮减速产生偏航力矩, 与舵机协同 */
+    /* ---- 差速辅助: 角度环输出 → 内侧轮减速 (与舵机解耦) ---- */
     {
-        float steer_abs;
-        steer_abs = (steer_output < 0.0f) ? -steer_output : steer_output;
-        if (steer_abs > DIFF_DEADZONE)
+        float ang_abs;
+        ang_abs = (ang_out < 0.0f) ? -ang_out : ang_out;
+        if (ang_abs > DIFF_DEADZONE)
         {
             float diff_ratio;
             float diff_amount;
-            diff_ratio = steer_abs / STEER_OUTPUT_LIMIT;
-            diff_amount = diff_ratio * DIFF_MAX_FACTOR;
-            if (steer_output > 0.0f)
+            diff_ratio = ang_abs / ANG_OUT_MAX;
+            if (diff_ratio > 1.0f) diff_ratio = 1.0f;
+            diff_amount = diff_ratio * DIFF_MAX_FACTOR * diff_strength;
+            if (ang_out > 0.0f)
             {
                 speed_now_r *= (1.0f - diff_amount);
             }
