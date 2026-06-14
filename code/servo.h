@@ -6,12 +6,14 @@
 #define SERVO_PIN      PWME_CH5_P43
 #define SERVO_FREQ     330
 
-// 占空比公式
-// 高电平时间 = 0.5ms + angle/180 * 2ms = (0.5 + angle/90.0) ms
-// 占空比 = 高电平时间 / 周期 * 10000
+// 占锟秸比癸拷式
+// 锟竭碉拷平时锟斤拷 = 0.5ms + angle/180 * 2ms = (0.5 + angle/90.0) ms
+// 占锟秸憋拷 = 锟竭碉拷平时锟斤拷 / 锟斤拷锟斤拷 * 10000
 //        = 10000 / (1000 / FREQ) * (0.5 + angle / 90.0)
 #define ANGLE_TO_DUTY(angle) \
     ((uint16_t)(1650 + (110 * (uint16_t)(angle)) / 3))
+
+extern float servo_trim_offset;
 
 void servo_Init(void);
 void servo_task(void);

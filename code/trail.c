@@ -781,9 +781,9 @@ static TRACK_ELEMENT detect_element_segment(void)
     else if (s0 == ROW_LEFT_JUMP || s0 == ROW_RIGHT_JUMP)
         return STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
 
-    /* ---- 双行比较 (分段无法判定时) ---- */
+    /* ---- 双行比较 (分段无法判定时, 远行上移提前判弯) ---- */
     near_y = (uint16_t)(MT9V034_HEIGHT - 20);
-    far_y = (uint16_t)VISION_LOOKAHEAD_Y;
+    far_y = (uint16_t)(MT9V034_HEIGHT / 2); /* y=60, 比默认85看得更远 */
 
     l_near = g_track.left[near_y];
     r_near = g_track.right[near_y];
@@ -811,12 +811,12 @@ static TRACK_ELEMENT detect_element_segment(void)
     {
         if (far_left_ok && !far_right_ok)
         {
-            if (l_far > 15)
+            if (l_far > 10)
                 return RIGHT_ANGLE_r;
         }
         if (!far_left_ok && far_right_ok)
         {
-            if (r_far < (int16_t)(MT9V034_WIDTH - 15))
+            if (r_far < (int16_t)(MT9V034_WIDTH - 10))
                 return RIGHT_ANGLE_l;
         }
         if (far_left_ok && far_right_ok)
@@ -824,26 +824,26 @@ static TRACK_ELEMENT detect_element_segment(void)
             c_near = (l_near + r_near) / 2;
             c_far = (l_far + r_far) / 2;
             dx = c_far - c_near;
-            if (dx > 4)
+            if (dx > 5)
                 return RIGHT_ANGLE_r;
-            if (dx < -4)
+            if (dx < -5)
                 return RIGHT_ANGLE_l;
         }
     }
     else if (near_left_ok && far_left_ok)
     {
         dx = l_far - l_near;
-        if (dx > 6)
+        if (dx > 5)
             return RIGHT_ANGLE_r;
-        if (dx < -6)
+        if (dx < -5)
             return RIGHT_ANGLE_l;
     }
     else if (near_right_ok && far_right_ok)
     {
         dx = r_far - r_near;
-        if (dx > 6)
+        if (dx > 5)
             return RIGHT_ANGLE_r;
-        if (dx < -6)
+        if (dx < -5)
             return RIGHT_ANGLE_l;
     }
 
@@ -1364,13 +1364,18 @@ void track_handle(void)
     track_midpoint_target_P = track_midpoint_target;
     current_element = track_element_judge();
     raw_elem = current_element;
+
+#if TRAIL_DBG_PRINTF
     cross_cnt = count_cross_rows(&g_track);
     break_row = detect_cross_break_row();
+#endif
 
-    // 计算纯追踪与曲率 (供速度决策)
+#if VISION_USE_PURE_PURSUIT || VOFA_FIREWATER
+    // 计算纯追踪与曲率 (供速度决策或调试)
     speed_est = 45.0f;
     plan_pure_pursuit(speed_est);
     pp_curvature = compute_road_curvature(&g_track);
+#endif
     pp_visible_high = g_track.visible_high;
 
     // 断桥升级: 累积行驶距离超过阈值 → 进入断桥后阶段 [本次比赛无断桥, 已注释]
@@ -1385,17 +1390,16 @@ void track_handle(void)
     track_fsm_update(&g_track_fsm, raw_elem);
     track_element = g_track_fsm.state;
 
-    // 靶子检测 (独立于元素分类, 不修改 track_element)
+    // 靶子检测 (独立于元素分类, 不修改 track_element, 每4帧跑一次)
     {
-        uint8_t target_found;
-        target_found = detect_target();
-        if (target_found)
+        static uint8_t target_skip = 0;
+        target_skip++;
+        if (target_skip >= 4)
         {
-            g_target_detected = 1;
-        }
-        else
-        {
-            g_target_detected = 0;
+            uint8_t target_found;
+            target_skip = 0;
+            target_found = detect_target();
+            g_target_detected = target_found ? 1 : 0;
         }
     }
 

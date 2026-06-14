@@ -499,7 +499,7 @@ TRACK_ELEMENT ring_fsm_process(ring_fsm_t *rf, TRACK_ELEMENT seg_elem)
     /* ---- 入口检测: 不在环岛中, 检查是否进入环岛 ----
        段分类看起来像直道或转弯, 但存在分叉+上方有路 → 环岛入口
        条件1(边界终点)+条件2(上方有路) 在 detect_ring() 内部同时验证 */
-    if (seg_elem == STRAIGHT || seg_elem == RIGHT_ANGLE_l || seg_elem == RIGHT_ANGLE_r)
+    if (seg_elem == STRAIGHT)
     {
         ring_check = detect_ring();
         if (ring_check == RING_l)

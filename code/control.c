@@ -22,6 +22,17 @@ float speed_base = 65;
 #define SPEED_MIN         25.0f   /* 最低速度 */
 #define SPEED_ACCEL_MAX   1.0f    /* 每帧(5ms)最大加速量, 防甩尾 */
 
+/* 差速辅助转向: 内侧轮减速比例 */
+#define DIFF_MAX_FACTOR   0.35f   /* 满舵时内侧轮减速 35% */
+#define DIFF_DEADZONE     2.0f    /* 死区: ±2° 内不启动差速 */
+
+/* 转向保护: 防突变 + 防长时间打死 */
+#define TRACK_ERROR_MAX     50.0f   /* 中线偏移上限, 超此值按异常处理 */
+#define POS_OUT_MAX         15.0f   /* 位置环输出上限 (度) */
+#define ANG_OUT_MAX         10.0f   /* 角度环输出上限 (度) */
+#define STEER_MAX_STEP      5.0f    /* 每帧舵角最大变化量 (度) */
+#define STEER_SAT_TIMEOUT   30      /* 连续饱和帧数, 超此值逐步回中 */
+
 /* TODO: 角度环融合 — 从图像中线偏移计算赛道方向, 修正车身姿态
    ANGLE_BLEND_WEIGHT: 角度环占比 (0.15~0.35), 越大角度环越强
    ANGLE_BLEND_KP:     角度环比例 (0.2~0.6), 输入单位=中线偏移像素
@@ -272,6 +283,7 @@ void steering_control(void)
         static float steer_smooth = 0.0f;
 
         track_error = (float)CENTER_POINT - (float)track_midpoint_target;
+        track_error = SATURATE(track_error, -TRACK_ERROR_MAX, TRACK_ERROR_MAX);
         cfg = track_fsm_get_cfg(&g_track_fsm);
         ema_alpha = cfg->ema_alpha;
 
@@ -351,6 +363,7 @@ void steering_control(void)
         pid_pos.Ki = fsm_Ki;
         pid_pos.integral_max = fsm_imax;
         pos_out = PositionalPID_Calculate(&pid_pos, track_error);
+        pos_out = SATURATE(pos_out, -POS_OUT_MAX, POS_OUT_MAX);
 
         /* 角度 PID: 赛道右偏(dx>0) → 右转(-dx<0) */
         pid_gyro.Kp = fsm_angle_kp;
@@ -358,6 +371,7 @@ void steering_control(void)
         pid_gyro.Kd = fsm_angle_kd;
         pid_gyro.integral_max = fsm_angle_imax;
         ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
+        ang_out = SATURATE(ang_out, -ANG_OUT_MAX, ANG_OUT_MAX);
 
         steer_output = pos_out * (1.0f - fsm_angle_w)
                      + ang_out * fsm_angle_w;
@@ -366,9 +380,60 @@ void steering_control(void)
     steer_output = SATURATE(steer_output, -STEER_OUTPUT_LIMIT, STEER_OUTPUT_LIMIT);
 
     steer_output = steer_smooth * (1.0f - cfg->ema_alpha) + steer_output * cfg->ema_alpha;
+
+    /* 变化率限制: 每帧最多变化 ±STEER_MAX_STEP 度, 防止突然打死 */
+    {
+        float steer_delta;
+        steer_delta = steer_output - steer_smooth;
+        if (steer_delta > STEER_MAX_STEP)
+            steer_output = steer_smooth + STEER_MAX_STEP;
+        else if (steer_delta < -STEER_MAX_STEP)
+            steer_output = steer_smooth - STEER_MAX_STEP;
+    }
     steer_smooth = steer_output;
 
+    /* 饱和超时保护: 连续满舵超过阈值 → 逐步回中, 防止卡死 */
+    {
+        static uint8_t sat_cnt = 0;
+        float steer_abs;
+        steer_abs = (steer_output < 0.0f) ? -steer_output : steer_output;
+        if (steer_abs >= (STEER_OUTPUT_LIMIT - 0.5f))
+        {
+            sat_cnt++;
+            if (sat_cnt > STEER_SAT_TIMEOUT)
+            {
+                steer_output *= 0.7f;
+                sat_cnt = STEER_SAT_TIMEOUT;
+            }
+        }
+        else
+        {
+            sat_cnt = 0;
+        }
+    }
+
     servo_set_wheel_angle(steer_output);
+
+    /* 差速辅助: 内侧轮减速产生偏航力矩, 与舵机协同 */
+    {
+        float steer_abs;
+        steer_abs = (steer_output < 0.0f) ? -steer_output : steer_output;
+        if (steer_abs > DIFF_DEADZONE)
+        {
+            float diff_ratio;
+            float diff_amount;
+            diff_ratio = steer_abs / STEER_OUTPUT_LIMIT;
+            diff_amount = diff_ratio * DIFF_MAX_FACTOR;
+            if (steer_output > 0.0f)
+            {
+                speed_now_r *= (1.0f - diff_amount);
+            }
+            else
+            {
+                speed_now_l *= (1.0f - diff_amount);
+            }
+        }
+    }
     }
 #endif
 }

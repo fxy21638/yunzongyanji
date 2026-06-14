@@ -2,14 +2,14 @@
 #include "key.h"
 #include "main.h"
 
-#define SERVO_MAX_ANGLE            110
-#define SERVO_MIN_ANGLE            70
+#define SERVO_MAX_ANGLE            105
+#define SERVO_MIN_ANGLE            75
 #define CAR_MAX_ANGLE				130
 #define CAR_MIN_ANGLE				50
 #define SERVO_CENTER_ANGLE         90.0f
 #define WHEEL_TO_SERVO_SCALE       2.00f
-#define WHEEL_TO_SERVO_OFFSET_DEG  0.0f
 
+float servo_trim_offset = 0.0f;  /* 舵机中位补偿: 车偏左→正值, 偏右→负值 */
 uint8_t servo_angle = 90;
 
 extern uint8_t key_id;
@@ -25,7 +25,7 @@ static uint8_t servo_clamp_angle(float angle_deg)
         angle_deg = SERVO_MAX_ANGLE;
     }
 
-    return (uint8_t)(angle_deg + 0.5f);
+    return (uint8_t)(angle_deg);
 }
 
 void servo_set_angle(uint8_t angle_deg)
@@ -37,7 +37,7 @@ void servo_set_angle(uint8_t angle_deg)
 void servo_set_wheel_angle(float wheel_angle_deg)
 {
     float servo_target = SERVO_CENTER_ANGLE +
-                         WHEEL_TO_SERVO_OFFSET_DEG +
+                         servo_trim_offset +
                          wheel_angle_deg * WHEEL_TO_SERVO_SCALE;
 
     servo_set_angle(servo_clamp_angle(servo_target));
