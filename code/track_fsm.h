@@ -22,13 +22,13 @@ typedef uint8_t track_plan_t;
 /* ---- 每元素配置 (11 元素 × 14 字段 = 56 字节/元素, ~616 字节 xdata) ---- */
 typedef struct
 {
-    /* 位置 PID — 中线偏差 → 舵机转向 */
+    /* 位置 PID — 中线偏差 → 差速辅助 (主力转向) */
     float    Kp;              /* 比例: 偏差越大输出越大 */
     float    Ki;              /* 积分: 消除稳态误差 (弯道/环岛使用) */
     float    Kd;              /* 微分: 阻尼, 抑制振荡 */
     float    integral_max;    /* 积分限幅 */
 
-    /* 角度 PID — 赛道方向变化 → 差速辅助 (内侧轮减速) */
+    /* 角度 PID — 赛道方向变化 → 舵机预判 */
     float    angle_kp;        /* 角度环比例 */
     float    angle_ki;        /* 角度环积分 */
     float    angle_kd;        /* 角度环微分 */

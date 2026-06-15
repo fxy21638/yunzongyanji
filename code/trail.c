@@ -92,10 +92,58 @@ uint8_t g_target_center_x = 94; /* 靶心 x 坐标 */
 uint8_t g_target_radius = 30;   /* 靶环内径的一半 */
 uint8_t g_target_y_mid = 60;    /* 靶心所在行 y */
 
+/* 出界检测 (调试专用): 摄像头全黑 → 停车 */
+uint8_t g_out_of_bounds = 0;
+static uint8_t s_oob_cnt = 0;
+#define OOB_WHITE_THRESHOLD  15   /* 采样白点数低于此值判定全黑 */
+#define OOB_DEBOUNCE          5   /* 连续全黑帧数确认出界 */
+
 /* 断桥状态 */
 uint8_t start_stage = 0;
 uint8_t broken_flag = 0;
 int32_t judge_distance = 0; /* 断桥累计行驶距离 */
+
+/* ================================================================
+ * 第 2.5 节 — 出界检测 (调试专用)
+ *
+ * 采样二值图白像素数: 低于阈值 → 判定摄像头全黑/赛道完全丢失 → 停车
+ * image_data: 赛道=0(黑), 背景=255(白), 尺寸 188×120 (已翻转)
+ * 采样步长 4 → ~1410 个采样点, 白点数 <15 即全黑
+ * ================================================================ */
+
+extern image_t image_data[];
+
+static void check_out_of_bounds(void)
+{
+    uint16_t i, j;
+    uint16_t white_cnt;
+    uint16_t row_off;
+
+    if (g_out_of_bounds)
+        return;
+
+    white_cnt = 0;
+    for (i = 0; i < (uint16_t)MT9V034_HEIGHT; i += 4)
+    {
+        row_off = i * (uint16_t)MT9V034_WIDTH;
+        for (j = 0; j < (uint16_t)MT9V034_WIDTH; j += 4)
+        {
+            if (image_data[row_off + j] == 0)   /* 0=赛道(白), 255=背景(黑) */
+                white_cnt++;
+        }
+    }
+
+    if (white_cnt < OOB_WHITE_THRESHOLD)
+    {
+        s_oob_cnt++;
+        if (s_oob_cnt >= OOB_DEBOUNCE)
+            g_out_of_bounds = 1;
+    }
+    else
+    {
+        s_oob_cnt = 0;
+    }
+}
 
 /* ================================================================
  * 第 3 节 — 元素名称 (调试用)
@@ -1353,6 +1401,13 @@ void track_handle(void)
     }
 
     vision_poll_track();
+    check_out_of_bounds();
+    if (g_out_of_bounds)
+    {
+        track_element = NONE;
+        current_element = NONE;
+        return;
+    }
     if (!g_track_valid)
     {
         track_element = NONE;
