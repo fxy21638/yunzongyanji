@@ -7,6 +7,7 @@
 #include "motor.h"
 #include "vision.h"
 #include "track_fsm.h"
+#include "laser.h"
 
 float speed_base = 110;
 
@@ -56,6 +57,8 @@ static void control_timer_callback(void)
     /* 陀螺仪 Z 轴积分: 追踪环岛转角 */
     gyro_z_dps = icm_get_gyro_z_dps();
     cnt_degree += (int32_t)(gyro_z_dps * 5.0f);  /* dps × 5ms → 毫度累计 */
+
+    laser_fsm_update();  /* 激光打标 FSM */
 
     if (speed_tune_mode)
     {
@@ -318,27 +321,21 @@ void steering_control(void)
             fsm_Kd *= speed_scale;
         }
 
-        /* 图像赛道方向: 中线近远偏移 */
+        /* 图像赛道方向: 中线近远偏移 — OptA: 直接用 g_track.mid[] (vision_track.c 已计算)
+           省 4 次数组读 + 2 次求均值, 校验 mid 有效性 (vision_track.c 中 mid[y] = -1 表示无效) */
         {
-            int16_t l_near, r_near;
-            int16_t l_far, r_far;
-            int16_t c_near, c_far;
+            int16_t mid_near, mid_far;
             uint16_t ny, fy;
 
             ny = (uint16_t)(MT9V034_HEIGHT - 20);
             fy = (uint16_t)VISION_LOOKAHEAD_Y;
 
-            l_near = g_track.left[ny];
-            r_near = g_track.right[ny];
-            l_far  = g_track.left[fy];
-            r_far  = g_track.right[fy];
+            mid_near = g_track.mid[ny];
+            mid_far  = g_track.mid[fy];
 
-            if (l_near > 2 && r_near < (int16_t)(MT9V034_WIDTH - 4) &&
-                l_far  > 2 && r_far  < (int16_t)(MT9V034_WIDTH - 4))
+            if (mid_near >= 0 && mid_far >= 0)
             {
-                c_near = (l_near + r_near) / 2;
-                c_far  = (l_far + r_far) / 2;
-                track_dx = (float)(c_far - c_near);
+                track_dx = (float)(mid_far - mid_near);
             }
             else
             {

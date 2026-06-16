@@ -42,7 +42,7 @@ extern uint8_t xdata mt9v034_image[MT9V034_HEIGHT][MT9V034_WIDTH];
 #define TRACK_WIDE_TH (MT9V034_WIDTH * 7 / 10)
 
 /* 调试开关 */
-#define TRAIL_DBG_PRINTF 0
+#define TRAIL_DBG_PRINTF 1
 
 /* 弯道/十字检测参数 */
 #define TRACK_MIN_VALID_TURN_ROWS 8
@@ -91,6 +91,14 @@ uint8_t g_target_detected = 0;  /* 当前帧检测到靶子 */
 uint8_t g_target_center_x = 94; /* 靶心 x 坐标 */
 uint8_t g_target_radius = 30;   /* 靶环内径的一半 */
 uint8_t g_target_y_mid = 60;    /* 靶心所在行 y */
+
+/* 障碍检测 (独立于赛道元素, 与靶子并行) */
+uint8_t g_obstacle_detected = 0;
+uint8_t g_obstacle_center_x = 94;
+uint8_t g_obstacle_width = 30;
+uint8_t g_obstacle_y_mid = 60;
+uint8_t g_obstacle_left_edge = 0;
+uint8_t g_obstacle_right_edge = 0;
 
 /* 出界检测 (调试专用): 摄像头全黑 → 停车 */
 uint8_t g_out_of_bounds = 0;
@@ -901,87 +909,89 @@ static TRACK_ELEMENT detect_element_segment(void)
 /* ================================================================
  * 第 8.5 节 — 靶子检测 (独立于赛道元素分类)
  *
- * 使用原始灰度图 (绕过二值化滤波, 避免薄环被 Image_Filter 吃掉)
- * 环壁=暗(≤100)→1, 赛道=亮(>100)→0, 模式: 0→1→0→1→0
- * 三段验证: 逐行5段收集 → 候选行计数 → 圆形几何校验
+ * 简化统一版: 利用横向直径/洞宽规律, 单函数覆盖远近
+ *   近处 5段: 亮→暗(壁)→亮(洞)→暗(壁)→亮  洞中心=靶心
+ *   远处 3段: 亮→暗(环)→亮                   暗段中心=靶心
+ * 逐行收集所有候选, 跨行聚类, 取最大中心一致簇
+ * 透视: 靶子洞宽远小近大 (span 随 y 递增)
  * ================================================================ */
-#define TARGET_GRAY_THRESH    100   /* 灰度阈值: ≤暗(环壁), >亮(赛道) */
 #define TARGET_SCAN_Y_START   ((uint16_t)(MT9V034_HEIGHT - 25)) /* 95 */
 #define TARGET_SCAN_Y_END     ((uint16_t)(MT9V034_HEIGHT / 4))   /* 30 */
 #define TARGET_MIN_TRACK_W    50
-#define TARGET_WALL_MIN       2
-#define TARGET_WALL_MAX       15
-#define TARGET_INNER_MIN      15
-#define TARGET_INNER_MAX      100
-#define TARGET_MIN_ROWS       8
-#define TARGET_CX_SPREAD_MAX  15
-#define TARGET_WALL_SPREAD    6
-#define TARGET_MAX_CAND       32
+#define TARGET_DARK_THRESH    100
+#define TARGET_MIN_ROWS       3
+#define TARGET_CX_CLUSTER     10
+#define TARGET_MAX_SEGS       32
+#define TARGET_MAX_CAND       64
+
+/* 障碍检测常量 */
+#define OBS_DW_MIN            20
+#define OBS_DW_MAX            100
+#define OBS_MAX_CAND          64
+#define OBS_CX_TOLERANCE      10
 
 static uint8_t detect_target(void)
 {
-    static uint8_t cand_cx[TARGET_MAX_CAND];
-    static uint8_t cand_iw[TARGET_MAX_CAND];
-    static uint8_t cand_lw[TARGET_MAX_CAND];
-    static uint8_t cand_rw[TARGET_MAX_CAND];
-    static uint8_t cand_y[TARGET_MAX_CAND];
-    uint8_t cand_cnt;
+    static uint8_t seg_val[TARGET_MAX_SEGS];
+    static uint8_t seg_start[TARGET_MAX_SEGS];
+    static uint8_t seg_end[TARGET_MAX_SEGS];
+    static uint8_t feat_y[TARGET_MAX_CAND];
+    static uint8_t feat_cx[TARGET_MAX_CAND];
+    static uint8_t feat_sp[TARGET_MAX_CAND];
+    static uint8_t feat_type[TARGET_MAX_CAND]; /* 3=5seg, 2=3segA, 1=3segB */
+    uint8_t feat_cnt;
     uint16_t y;
-    int16_t l_bound;
-    int16_t r_bound;
+    int16_t l_bound, r_bound;
     uint16_t track_w;
     uint16_t x;
-    uint8_t seg_val[6];
-    uint8_t seg_start[6];
-    uint8_t seg_end[6];
     uint8_t seg_cnt;
     uint8_t in_seg;
     uint8_t pix;
     uint8_t cur_val;
-    uint8_t lw;
-    uint8_t iw;
-    uint8_t rw;
+    uint8_t idx;
+    uint8_t pos;
+    uint8_t lw, hw, rw;
+    uint8_t lb, rb;
+    uint8_t lr_diff;
+    uint8_t dw;
     uint8_t cx;
-    uint8_t i;
-    uint8_t cx_min;
-    uint8_t cx_max;
-    uint8_t iw_min;
-    uint8_t iw_max;
-    uint8_t iw_max_idx;
-    uint8_t lw_min;
-    uint8_t lw_max;
-    uint8_t rw_min;
-    uint8_t rw_max;
-    uint8_t j;
-    uint8_t tmp;
+    uint8_t best_prio;
+    uint8_t best_cx, best_sp;
+    uint8_t feat_i;
+    uint8_t streak_start, streak_len;
+    uint8_t best_start, best_len;
+    uint8_t cur_start;
+    uint8_t i, j;
+    uint8_t anchor_cx;
+    uint8_t tmp_arr[3];
+    uint8_t strong_cnt;
+    uint8_t cx_min, cx_max;
+    uint8_t cx_med;
+    uint8_t sp_bot, sp_top;
+    uint8_t max_sp;
+    uint16_t score, best_score;
 
-    cand_cnt = 0;
+    feat_cnt = 0;
 
-    /* 第一段: 逐行5段模式收集 (底→顶) */
+    /* 第一遍: 逐行收集最佳候选 (底→顶), 每行只保留优先级最高的 */
     for (y = TARGET_SCAN_Y_START; y > TARGET_SCAN_Y_END; y--)
     {
         l_bound = g_track.left[y];
         r_bound = g_track.right[y];
-        if (l_bound < 2 || r_bound >= (int16_t)(MT9V034_WIDTH - 4))
-            continue;
-
         track_w = (uint16_t)(r_bound - l_bound + 1);
         if (track_w < TARGET_MIN_TRACK_W)
             continue;
 
-        /* 在赛道边界内扫描, 分割连续同色段 */
         seg_cnt = 0;
         in_seg = 0;
-
-        for (x = (uint16_t)(l_bound + 2); x <= (uint16_t)(r_bound - 2); x++)
+        for (x = (uint16_t)l_bound; x <= (uint16_t)r_bound; x++)
         {
             pix = mt9v034_image[y][x];
-            cur_val = (pix <= TARGET_GRAY_THRESH) ? 1 : 0;
+            cur_val = (pix <= TARGET_DARK_THRESH) ? 1 : 0;
 
             if (!in_seg)
             {
-                if (seg_cnt >= 6)
-                    break;
+                if (seg_cnt >= TARGET_MAX_SEGS) break;
                 seg_val[seg_cnt] = cur_val;
                 seg_start[seg_cnt] = (uint8_t)x;
                 in_seg = 1;
@@ -990,124 +1000,558 @@ static uint8_t detect_target(void)
             {
                 seg_end[seg_cnt] = (uint8_t)(x - 1);
                 seg_cnt++;
-                if (seg_cnt >= 6)
-                    break;
+                if (seg_cnt >= TARGET_MAX_SEGS) break;
                 seg_val[seg_cnt] = cur_val;
                 seg_start[seg_cnt] = (uint8_t)x;
             }
         }
-        if (in_seg && seg_cnt < 6)
+        if (in_seg)
         {
-            seg_end[seg_cnt] = (uint8_t)(r_bound - 2);
+            seg_end[seg_cnt] = (uint8_t)r_bound;
             seg_cnt++;
         }
 
-        /* 必须恰好5段: 0→1→0→1→0 */
-        if (seg_cnt != 5)
-            continue;
-        if (seg_val[0] != 0 || seg_val[1] != 1 ||
-            seg_val[2] != 0 || seg_val[3] != 1 ||
-            seg_val[4] != 0)
-            continue;
+        if (seg_cnt < 3) continue;
 
-        lw = seg_end[1] - seg_start[1] + 1;
-        iw = seg_end[2] - seg_start[2] + 1;
-        rw = seg_end[3] - seg_start[3] + 1;
+        idx = 0;
+        while (idx < seg_cnt && seg_val[idx] == 1) idx++;
 
-        if (lw < TARGET_WALL_MIN || lw > TARGET_WALL_MAX)
-            continue;
-        if (rw < TARGET_WALL_MIN || rw > TARGET_WALL_MAX)
-            continue;
-        if (iw < TARGET_INNER_MIN || iw > TARGET_INNER_MAX)
-            continue;
+        best_prio = 0;
+        best_cx = 0;
+        best_sp = 0;
+        pos = idx;
 
-        cx = (seg_start[2] + seg_end[2]) / 2;
-
-        if (cand_cnt < TARGET_MAX_CAND)
+        while (pos + 2 < seg_cnt)
         {
-            cand_y[cand_cnt] = (uint8_t)y;
-            cand_cx[cand_cnt] = cx;
-            cand_iw[cand_cnt] = iw;
-            cand_lw[cand_cnt] = lw;
-            cand_rw[cand_cnt] = rw;
-            cand_cnt++;
+            if (seg_val[pos] != 0) { pos++; continue; }
+
+            /* 5 段: 亮→暗→亮→暗→亮 (优先级 3) */
+            if (pos + 4 < seg_cnt
+                && seg_val[pos + 1] == 1 && seg_val[pos + 2] == 0
+                && seg_val[pos + 3] == 1 && seg_val[pos + 4] == 0)
+            {
+                lw = seg_end[pos + 1] - seg_start[pos + 1] + 1;
+                hw = seg_end[pos + 2] - seg_start[pos + 2] + 1;
+                rw = seg_end[pos + 3] - seg_start[pos + 3] + 1;
+                lb = seg_end[pos + 0] - seg_start[pos + 0] + 1;
+                rb = seg_end[pos + 4] - seg_start[pos + 4] + 1;
+                lr_diff = (lw >= rw) ? (uint8_t)(lw - rw) : (uint8_t)(rw - lw);
+
+                if (1 <= lw && lw <= 15 && 1 <= rw && rw <= 15
+                    && lr_diff <= 3 && 2 <= hw && hw <= 45
+                    && hw >= lw + rw && lb >= 5 && rb >= 3)
+                {
+                    cx = (seg_start[pos + 2] + seg_end[pos + 2]) / 2;
+                    if (3 > best_prio)
+                    {
+                        best_prio = 3;
+                        best_cx = cx;
+                        best_sp = seg_end[pos + 3] - seg_start[pos + 1] + 1;
+                    }
+                }
+            }
+
+            /* 3 段 A: dw≥5 (优先级 2) / B: dw≥3 (优先级 1) */
+            if (seg_val[pos + 1] == 1 && seg_val[pos + 2] == 0)
+            {
+                dw = seg_end[pos + 1] - seg_start[pos + 1] + 1;
+                lb = seg_end[pos + 0] - seg_start[pos + 0] + 1;
+                rb = seg_end[pos + 2] - seg_start[pos + 2] + 1;
+
+                if (dw >= 5 && dw <= 60 && lb >= 5 && rb >= 3)
+                {
+                    cx = (seg_start[pos + 1] + seg_end[pos + 1]) / 2;
+                    if (2 > best_prio)
+                    {
+                        best_prio = 2;
+                        best_cx = cx;
+                        best_sp = dw;
+                    }
+                }
+                else if (dw >= 3 && lb >= 15 && rb >= 10)
+                {
+                    cx = (seg_start[pos + 1] + seg_end[pos + 1]) / 2;
+                    if (1 > best_prio)
+                    {
+                        best_prio = 1;
+                        best_cx = cx;
+                        best_sp = dw;
+                    }
+                }
+            }
+
+            pos++;
+        }
+
+        if (best_prio > 0 && feat_cnt < TARGET_MAX_CAND)
+        {
+            feat_y[feat_cnt]    = (uint8_t)y;
+            feat_cx[feat_cnt]   = best_cx;
+            feat_sp[feat_cnt]   = best_sp;
+            feat_type[feat_cnt] = best_prio;
+            feat_cnt++;
         }
     }
 
-    /* 第二段: 候选行数检查 */
-    if (cand_cnt < TARGET_MIN_ROWS)
+    if (feat_cnt < TARGET_MIN_ROWS)
         return 0;
 
-    /* 第三段-A: 中心 x 一致性 (圆环中心在竖直线上) */
-    cx_min = 255;
-    cx_max = 0;
-    for (i = 0; i < cand_cnt; i++)
-    {
-        if (cand_cx[i] < cx_min)
-            cx_min = cand_cx[i];
-        if (cand_cx[i] > cx_max)
-            cx_max = cand_cx[i];
-    }
-    if ((uint8_t)(cx_max - cx_min) >= TARGET_CX_SPREAD_MAX)
-        return 0;
+    /* 第二遍: 连续行一致性筛选 (固定锚点防漂移)
+       feat 已按 y 降序 (底→顶), 即 feat_y[0] 最大(最近) */
+    best_start = 0;
+    best_len   = 0;
+    best_score = 0;
+    cur_start  = 0;
 
-    /* 第三段-B: 内径弧线轮廓 (小→大→小, 最大值在中间) */
-    iw_min = 255;
-    iw_max = 0;
-    iw_max_idx = 0;
-    for (i = 0; i < cand_cnt; i++)
+    while (cur_start < feat_cnt)
     {
-        if (cand_iw[i] > iw_max)
+        /* 从 cur_start 开始构建 streak */
+        streak_start = cur_start;
+        streak_len   = 1;
+
+        /* 固定锚点: 前 3 个元素的中位数 cx */
+        if (streak_len >= 3)
         {
-            iw_max = cand_iw[i];
-            iw_max_idx = i;
+            tmp_arr[0] = feat_cx[streak_start];
+            tmp_arr[1] = feat_cx[streak_start + 1];
+            tmp_arr[2] = feat_cx[streak_start + 2];
+            /* 冒泡排序 3 个元素 */
+            if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+            if (tmp_arr[1] > tmp_arr[2]) { j = tmp_arr[1]; tmp_arr[1] = tmp_arr[2]; tmp_arr[2] = j; }
+            if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+            anchor_cx = tmp_arr[1];
         }
-        if (cand_iw[i] < iw_min)
-            iw_min = cand_iw[i];
-    }
-    if (iw_max_idx == 0 || iw_max_idx == (uint8_t)(cand_cnt - 1))
-        return 0;
-    if (iw_max < iw_min + iw_min / 2)
-        return 0;
-
-    /* 第三段-C: 壁宽一致性 (环壁厚度均匀) */
-    lw_min = 255;
-    lw_max = 0;
-    rw_min = 255;
-    rw_max = 0;
-    for (i = 0; i < cand_cnt; i++)
-    {
-        if (cand_lw[i] < lw_min)
-            lw_min = cand_lw[i];
-        if (cand_lw[i] > lw_max)
-            lw_max = cand_lw[i];
-        if (cand_rw[i] < rw_min)
-            rw_min = cand_rw[i];
-        if (cand_rw[i] > rw_max)
-            rw_max = cand_rw[i];
-    }
-    if ((uint8_t)(lw_max - lw_min) > TARGET_WALL_SPREAD)
-        return 0;
-    if ((uint8_t)(rw_max - rw_min) > TARGET_WALL_SPREAD)
-        return 0;
-
-    /* 取中心 x 中位数 */
-    for (i = 0; i < cand_cnt; i++)
-    {
-        tmp = cand_cx[i];
-        j = i;
-        while (j > 0 && cand_cx[j - 1] > tmp)
+        else
         {
-            cand_cx[j] = cand_cx[j - 1];
-            j--;
+            anchor_cx = feat_cx[streak_start];
         }
-        cand_cx[j] = tmp;
+
+        /* 从 streak_start+1 开始向后扩展 */
+        for (i = streak_start + 1; i < feat_cnt; i++)
+        {
+            /* y 间隔检查: 允许 ≤2 行空缺 */
+            {
+                uint8_t prev_y;
+                prev_y = feat_y[streak_start + streak_len - 1];
+                if (prev_y - feat_y[i] > 3) /* 3 = MAX_Y_GAP(2) + 1 */
+                    break;
+            }
+
+            /* cx 一致性: |cx - anchor| ≤ 6 */
+            {
+                int16_t diff;
+                diff = (int16_t)feat_cx[i] - (int16_t)anchor_cx;
+                if (diff < 0) diff = -diff;
+                if (diff > 6) /* CX_TOLERANCE = 5, 放宽到 6 抗噪 */
+                    break;
+            }
+
+            streak_len++;
+
+            /* 锚点更新: ≥3 行后重新计算 */
+            if (streak_len == 3)
+            {
+                tmp_arr[0] = feat_cx[streak_start];
+                tmp_arr[1] = feat_cx[streak_start + 1];
+                tmp_arr[2] = feat_cx[streak_start + 2];
+                if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+                if (tmp_arr[1] > tmp_arr[2]) { j = tmp_arr[1]; tmp_arr[1] = tmp_arr[2]; tmp_arr[2] = j; }
+                if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+                anchor_cx = tmp_arr[1];
+            }
+        }
+
+        /* 评分当前 streak */
+        if (streak_len >= TARGET_MIN_ROWS)
+        {
+            /* 统计强信号数量, cx 范围, span 透视 */
+            strong_cnt = 0;
+            cx_min = 255;
+            cx_max = 0;
+            max_sp = 0;
+            sp_bot = feat_sp[streak_start]; /* 第一行 = 最近 (底部) */
+
+            for (i = streak_start; i < streak_start + streak_len; i++)
+            {
+                if (feat_type[i] >= 2) strong_cnt++; /* 5seg=3, 3segA=2 */
+                if (feat_cx[i] < cx_min) cx_min = feat_cx[i];
+                if (feat_cx[i] > cx_max) cx_max = feat_cx[i];
+                if (feat_sp[i] > max_sp) max_sp = feat_sp[i];
+            }
+            sp_top = feat_sp[streak_start + streak_len - 1]; /* 最后一行 = 最远 (顶部) */
+
+            /* cx 范围检查 */
+            if ((uint8_t)(cx_max - cx_min) > 12)
+                goto next_streak;
+
+            /* 纯 B 级信号需要更多行 */
+            if (strong_cnt == 0 && streak_len < 5)
+                goto next_streak;
+
+            /* 透视检查: span 不应从远到近明显缩小 */
+            if (sp_top > sp_bot && sp_bot > 0)
+            {
+                /* sp_top > sp_bot 意味着远处 span 大于近处, 不符合透视 */
+                if ((uint16_t)sp_top * 10 > (uint16_t)sp_bot * 15)
+                    goto next_streak; /* sp_top/sp_bot > 1.5 → 拒绝 */
+            }
+
+            /* 评分: 长度优先, 强信号加分, cx 稳定加分 */
+            score = (uint16_t)streak_len * 10 + (uint16_t)strong_cnt * 8;
+            if (score > best_score)
+            {
+                best_score = score;
+                best_start = streak_start;
+                best_len   = streak_len;
+            }
+        }
+
+next_streak:
+        cur_start++;
+        /* 跳过重叠的 streak: 从下一个候选行开始 */
     }
 
-    g_target_center_x = cand_cx[cand_cnt / 2];
-    g_target_radius = (uint8_t)(iw_max / 2); /* 内径的一半 ≈ 圆环半径 */
-    g_target_y_mid = cand_y[iw_max_idx];     /* 内径最大处的行号 ≈ 圆环中心 y */
+    if (best_len < TARGET_MIN_ROWS)
+        return 0;
+
+    /* 第三遍: 从最佳 streak 输出结果 */
+    {
+        uint8_t med_idx;
+        uint8_t tmp_cxs[12]; /* 最多 12 行 */
+        uint8_t sort_i, sort_j, tmp_cx;
+
+        max_sp = 0;
+        for (i = best_start; i < best_start + best_len; i++)
+        {
+            tmp_cxs[i - best_start] = feat_cx[i];
+            if (feat_sp[i] > max_sp)
+            {
+                max_sp = feat_sp[i];
+                g_target_y_mid = feat_y[i];
+            }
+        }
+
+        /* 中位数 cx */
+        for (sort_i = 1; sort_i < best_len; sort_i++)
+        {
+            tmp_cx = tmp_cxs[sort_i];
+            sort_j = sort_i;
+            while (sort_j > 0 && tmp_cxs[sort_j - 1] > tmp_cx)
+            {
+                tmp_cxs[sort_j] = tmp_cxs[sort_j - 1];
+                sort_j--;
+            }
+            tmp_cxs[sort_j] = tmp_cx;
+        }
+        g_target_center_x = tmp_cxs[best_len / 2];
+        g_target_radius   = max_sp / 2;
+    }
+
     return 1;
+}
+
+/* ================================================================
+ * 第 8.6 节 — 障碍检测 (独立于靶子检测)
+ *
+ * 障碍是实心矩形暗块 (dw >= 20), 与靶子(空心环)不同.
+ * 逐行扫描 3 段模式 (亮→暗→亮), 暗段宽 ≥ 20 即为候选.
+ * 跨行连续性筛选 (与靶子相同的 streak 逻辑, 但 cx 容差更大).
+ * ================================================================ */
+static uint8_t detect_obstacle(void)
+{
+    static uint8_t seg_val[TARGET_MAX_SEGS];
+    static uint8_t seg_start[TARGET_MAX_SEGS];
+    static uint8_t seg_end[TARGET_MAX_SEGS];
+    static uint8_t feat_y[OBS_MAX_CAND];
+    static uint8_t feat_cx[OBS_MAX_CAND];
+    static uint8_t feat_dw[OBS_MAX_CAND];
+    static uint8_t feat_x0[OBS_MAX_CAND];
+    static uint8_t feat_x1[OBS_MAX_CAND];
+    uint8_t feat_cnt;
+    uint16_t y;
+    int16_t l_bound, r_bound;
+    uint16_t track_w;
+    uint16_t x;
+    uint8_t seg_cnt;
+    uint8_t in_seg;
+    uint8_t pix;
+    uint8_t cur_val;
+    uint8_t idx;
+    uint8_t pos;
+    uint8_t dw, lb, rb;
+    uint8_t cx;
+    uint8_t best_dw;
+    uint8_t best_cx, best_x0, best_x1;
+    uint8_t rows_sorted[OBS_MAX_CAND];
+    uint8_t row_count;
+    uint8_t cur_streak[OBS_MAX_CAND];
+    uint8_t streak_len;
+    uint8_t best_start, best_len;
+    uint8_t anchor_cx;
+    uint8_t tmp_arr[3];
+    uint8_t i, j;
+    uint8_t sort_i, sort_j, tmp_val;
+
+    feat_cnt = 0;
+
+    /* Step 1: 逐行收集障碍候选 (底→顶) */
+    for (y = TARGET_SCAN_Y_START; y > TARGET_SCAN_Y_END; y--)
+    {
+        l_bound = g_track.left[y];
+        r_bound = g_track.right[y];
+        track_w = (uint16_t)(r_bound - l_bound + 1);
+        if (track_w < TARGET_MIN_TRACK_W)
+            continue;
+
+        seg_cnt = 0;
+        in_seg = 0;
+        for (x = (uint16_t)l_bound; x <= (uint16_t)r_bound; x++)
+        {
+            pix = mt9v034_image[y][x];
+            cur_val = (pix <= TARGET_DARK_THRESH) ? 1 : 0;
+
+            if (!in_seg)
+            {
+                if (seg_cnt >= TARGET_MAX_SEGS) break;
+                seg_val[seg_cnt] = cur_val;
+                seg_start[seg_cnt] = (uint8_t)x;
+                in_seg = 1;
+            }
+            else if (cur_val != seg_val[seg_cnt])
+            {
+                seg_end[seg_cnt] = (uint8_t)(x - 1);
+                seg_cnt++;
+                if (seg_cnt >= TARGET_MAX_SEGS) break;
+                seg_val[seg_cnt] = cur_val;
+                seg_start[seg_cnt] = (uint8_t)x;
+            }
+        }
+        if (in_seg)
+        {
+            seg_end[seg_cnt] = (uint8_t)r_bound;
+            seg_cnt++;
+        }
+
+        if (seg_cnt < 3) continue;
+
+        idx = 0;
+        while (idx < seg_cnt && seg_val[idx] == 1) idx++;
+
+        best_dw = 0;
+        best_cx = 0;
+        best_x0 = 0;
+        best_x1 = 0;
+        pos = idx;
+
+        while (pos + 2 < seg_cnt)
+        {
+            if (seg_val[pos] != 0) { pos++; continue; }
+
+            /* 只检查 3 段模式: 亮→暗→亮 */
+            if (seg_val[pos + 1] == 1 && seg_val[pos + 2] == 0)
+            {
+                dw = seg_end[pos + 1] - seg_start[pos + 1] + 1;
+                lb = seg_end[pos + 0] - seg_start[pos + 0] + 1;
+                rb = seg_end[pos + 2] - seg_start[pos + 2] + 1;
+
+                if (dw >= OBS_DW_MIN && dw <= OBS_DW_MAX && lb >= 5 && rb >= 5)
+                {
+                    cx = (seg_start[pos + 1] + seg_end[pos + 1]) / 2;
+                    /* 优先选择更宽的暗段 (更多像素 = 更可靠) */
+                    if (dw > best_dw)
+                    {
+                        best_dw = dw;
+                        best_cx = cx;
+                        best_x0 = seg_start[pos + 1];
+                        best_x1 = seg_end[pos + 1];
+                    }
+                }
+            }
+
+            pos++;
+        }
+
+        if (best_dw > 0 && feat_cnt < OBS_MAX_CAND)
+        {
+            feat_y[feat_cnt]  = (uint8_t)y;
+            feat_cx[feat_cnt] = best_cx;
+            feat_dw[feat_cnt] = best_dw;
+            feat_x0[feat_cnt] = best_x0;
+            feat_x1[feat_cnt] = best_x1;
+            feat_cnt++;
+        }
+    }
+
+    if (feat_cnt < TARGET_MIN_ROWS)
+        return 0;
+
+    /* Step 2: 连续行一致性筛选 (与靶子相同的 streak 逻辑) */
+    best_start = 0;
+    best_len   = 0;
+
+    /* 构建行号排序数组 (底→顶, 已在 feat 中) */
+    row_count = feat_cnt;
+
+    {
+        uint8_t cur_start;
+        cur_start = 0;
+        while (cur_start < row_count)
+        {
+            streak_len = 1;
+            /* 固定锚点 */
+            if (streak_len >= 3)
+            {
+                tmp_arr[0] = feat_cx[cur_start];
+                tmp_arr[1] = feat_cx[cur_start + 1];
+                tmp_arr[2] = feat_cx[cur_start + 2];
+                if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+                if (tmp_arr[1] > tmp_arr[2]) { j = tmp_arr[1]; tmp_arr[1] = tmp_arr[2]; tmp_arr[2] = j; }
+                if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+                anchor_cx = tmp_arr[1];
+            }
+            else
+            {
+                anchor_cx = feat_cx[cur_start];
+            }
+
+            for (i = cur_start + 1; i < row_count; i++)
+            {
+                {
+                    uint8_t prev_y;
+                    int16_t diff;
+                    prev_y = feat_y[cur_start + streak_len - 1];
+                    if (prev_y - feat_y[i] > 3)
+                        break;
+                    diff = (int16_t)feat_cx[i] - (int16_t)anchor_cx;
+                    if (diff < 0) diff = -diff;
+                    if (diff > OBS_CX_TOLERANCE)
+                        break;
+                }
+
+                streak_len++;
+
+                if (streak_len == 3)
+                {
+                    tmp_arr[0] = feat_cx[cur_start];
+                    tmp_arr[1] = feat_cx[cur_start + 1];
+                    tmp_arr[2] = feat_cx[cur_start + 2];
+                    if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+                    if (tmp_arr[1] > tmp_arr[2]) { j = tmp_arr[1]; tmp_arr[1] = tmp_arr[2]; tmp_arr[2] = j; }
+                    if (tmp_arr[0] > tmp_arr[1]) { j = tmp_arr[0]; tmp_arr[0] = tmp_arr[1]; tmp_arr[1] = j; }
+                    anchor_cx = tmp_arr[1];
+                }
+            }
+
+            if (streak_len > best_len)
+            {
+                best_len   = streak_len;
+                best_start = cur_start;
+            }
+
+            cur_start++;
+        }
+    }
+
+    if (best_len < TARGET_MIN_ROWS)
+        return 0;
+
+    /* Step 3: 从最佳 streak 输出结果 */
+    {
+        uint8_t max_dw;
+        uint8_t med_idx;
+        uint8_t tmp_cxs[12];
+
+        max_dw = 0;
+        for (i = best_start; i < best_start + best_len; i++)
+        {
+            tmp_cxs[i - best_start] = feat_cx[i];
+            if (feat_dw[i] > max_dw)
+            {
+                max_dw = feat_dw[i];
+                g_obstacle_y_mid      = feat_y[i];
+                g_obstacle_left_edge  = feat_x0[i];
+                g_obstacle_right_edge = feat_x1[i];
+            }
+        }
+
+        /* 中位数 cx */
+        for (sort_i = 1; sort_i < best_len; sort_i++)
+        {
+            tmp_val = tmp_cxs[sort_i];
+            sort_j = sort_i;
+            while (sort_j > 0 && tmp_cxs[sort_j - 1] > tmp_val)
+            {
+                tmp_cxs[sort_j] = tmp_cxs[sort_j - 1];
+                sort_j--;
+            }
+            tmp_cxs[sort_j] = tmp_val;
+        }
+        g_obstacle_center_x = tmp_cxs[best_len / 2];
+        g_obstacle_width     = max_dw;
+    }
+
+    return 1;
+}
+
+/* 综合瞄准: 靶子吸引 + 障碍排斥 → 单一目标点
+   仅靶子: 指向靶心
+   仅障碍: 指向远离障碍的一侧 (空间更大的一侧)
+   两者都有: 靶子吸引(权重 2.0) + 障碍排斥(权重 1.5), 加权合成 */
+static uint8_t compute_combined_aim(void)
+{
+    uint8_t t_det, o_det;
+    uint8_t t_cx, o_cx, o_x0, o_x1;
+    uint8_t left_space, right_space;
+    int16_t aim;
+    int16_t push;
+
+    t_det = g_target_detected;
+    o_det = g_obstacle_detected;
+    t_cx  = g_target_center_x;
+    o_cx  = g_obstacle_center_x;
+    o_x0  = g_obstacle_left_edge;
+    o_x1  = g_obstacle_right_edge;
+    left_space  = 0;
+    right_space = 0;
+
+    if (!t_det && !o_det)
+        return CENTER_POINT;
+
+    if (t_det && !o_det)
+        return t_cx;
+
+    if (o_det && !t_det)
+    {
+        left_space  = o_x0;
+        right_space = (uint8_t)(MT9V034_WIDTH - o_x1);
+        if (left_space > right_space)
+            return (uint8_t)(o_x0 / 2);
+        else
+            return (uint8_t)(o_x1 + (MT9V034_WIDTH - o_x1) / 2);
+    }
+
+    /* 两者都有: 靶子吸引 + 障碍排斥
+       target_weight=2.0, obstacle_weight=1.5
+       障碍在左 → 向右推; 障碍在右 → 向左推 */
+    aim = (int16_t)t_cx;
+    if (o_cx < t_cx)
+    {
+        push = (int16_t)(t_cx - o_cx) * 15 / 35;  /* 1.5/(2.0+1.5) * 10 */
+        aim = (int16_t)t_cx + push;
+    }
+    else
+    {
+        push = (int16_t)(o_cx - t_cx) * 15 / 35;
+        aim = (int16_t)t_cx - push;
+    }
+
+    if (aim < 5) aim = 5;
+    if (aim > (int16_t)(MT9V034_WIDTH - 5)) aim = (int16_t)(MT9V034_WIDTH - 5);
+
+    (void)left_space;
+    (void)right_space;
+
+    return (uint8_t)aim;
 }
 
 /* ================================================================
@@ -1166,7 +1610,7 @@ TRACK_ELEMENT track_element_judge(void)
  * plan_pure_pursuit()    — 纯追踪: 中线点集 → 前瞻转向角
  * ================================================================ */
 
-/* 直道: 近行(98)+远行(60)加权, 远行权重 67% */
+/* 直道: 近行(98)+远行(60)加权 — Fix 3b: 近行 67% (噪声小) + 远行 33% (前瞻) */
 static uint8_t plan_straight_center(void)
 {
     int16_t near_mid, far_mid, target;
@@ -1175,7 +1619,7 @@ static uint8_t plan_straight_center(void)
     far_mid = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_FAR);
     if (near_mid >= 0 && far_mid >= 0)
     {
-        target = (int16_t)((near_mid + far_mid * 2) / 3);
+        target = (int16_t)((near_mid * 2 + far_mid) / 3);
         return clamp_center_to_target(target);
     }
     if (g_track.center_x >= 0)
@@ -1300,6 +1744,8 @@ static void vofa_send_firewater(void)
     fvals[8] = (float)g_track.mid_step;
     if (g_target_detected)
         fvals[9] = (float)((int16_t)g_target_center_x + 256);
+    else if (g_obstacle_detected)
+        fvals[9] = (float)((int16_t)g_obstacle_center_x + 512);
     else
         fvals[9] = (float)track_element;
 
@@ -1442,21 +1888,28 @@ void track_handle(void)
     }
     */
 
-    track_fsm_update(&g_track_fsm, raw_elem);
-    track_element = g_track_fsm.state;
-
-    // 靶子检测 (独立于元素分类, 不修改 track_element, 每4帧跑一次)
+    // 靶子+障碍检测 (在 FSM 之前, 检测到则强制直道, 避免靶环干扰元素分类)
     {
         static uint8_t target_skip = 0;
         target_skip++;
         if (target_skip >= 4)
         {
             uint8_t target_found;
+            uint8_t obstacle_found;
             target_skip = 0;
             target_found = detect_target();
             g_target_detected = target_found ? 1 : 0;
+            obstacle_found = detect_obstacle();
+            g_obstacle_detected = obstacle_found ? 1 : 0;
         }
     }
+
+    if ((g_target_detected || g_obstacle_detected)
+        && current_element != RING_l && current_element != RING_r && current_element != RING_c)
+        raw_elem = STRAIGHT;
+
+    track_fsm_update(&g_track_fsm, raw_elem);
+    track_element = g_track_fsm.state;
 
     // 目标规划 — 环岛状态用专用规划函数, 其他按 FSM plan 委派
     plan = track_fsm_get_plan(&g_track_fsm);
@@ -1487,23 +1940,24 @@ void track_handle(void)
     }
     /* PLAN_HOLD 和 PLAN_BROKEN: 保持上一帧目标 */
 
-    /* 靶子覆写: 检测到圆环时, 目标点指向环中心 */
-    if (g_target_detected)
+    /* 靶子+障碍覆写: 综合吸引(靶子) + 排斥(障碍) → 单一目标点 */
+    if (g_target_detected || g_obstacle_detected)
     {
-        new_target = g_target_center_x;
+        new_target = compute_combined_aim();
     }
 
     // 后处理: 跳变限幅 ±12px + 逐状态 EMA 平滑
-    if (!g_target_detected &&
+    if (!g_target_detected && !g_obstacle_detected &&
         track_element != NONE &&
         track_element != RIGHT_ANGLE_l && track_element != RIGHT_ANGLE_r &&
         track_element != RING_l && track_element != RING_r)
     {
         jump = (int16_t)new_target - (int16_t)track_midpoint_target_P;
-        if (jump > 12)
-            new_target = (uint8_t)((int16_t)track_midpoint_target_P + 12);
-        else if (jump < -12)
-            new_target = (uint8_t)((int16_t)track_midpoint_target_P - 12);
+        /* Fix 3c: 跳变限制 ±12 → ±6, 抑制 10Hz 振荡 */
+        if (jump > 6)
+            new_target = (uint8_t)((int16_t)track_midpoint_target_P + 6);
+        else if (jump < -6)
+            new_target = (uint8_t)((int16_t)track_midpoint_target_P - 6);
 
         ema_alpha = track_fsm_get_ema_alpha(&g_track_fsm);
         {
@@ -1518,7 +1972,7 @@ void track_handle(void)
     }
 
 #if TRAIL_DBG_PRINTF
-    printf("DBG feature:%d cross_cnt:%u break_row:%d valid_rows:%u center_x:%d element:%s target:%u tg_det:%u tg_cx:%u pp_ang:%.1f\r\n",
+    printf("DBG feature:%d cross_cnt:%u break_row:%d valid_rows:%u center_x:%d element:%s target:%u tg_det:%u tg_cx:%u ob_det:%u ob_cx:%u pp_ang:%.1f\r\n",
            g_track.feature,
            cross_cnt,
            break_row,
@@ -1528,6 +1982,8 @@ void track_handle(void)
            track_midpoint_target,
            g_target_detected,
            g_target_center_x,
+           g_obstacle_detected,
+           g_obstacle_center_x,
            pp_steering_angle);
 #endif
 

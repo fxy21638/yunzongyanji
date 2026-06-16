@@ -29,11 +29,12 @@ void System_Init(void)
     motor_Init();
     encoder_Init();
     servo_Init();
+    laser_Init();   // P9.0 激光常亮
     control_Init();
 }
 
 void debug_main(void)
 {
     track_handle();
-    //vofa_image_task();
+    vofa_image_task();
 }

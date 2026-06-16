@@ -905,7 +905,7 @@ static void draw_target_overlay(uint8_t *out)
         return;
     if (cy < 5 || cy >= (int16_t)(MT9V034_HEIGHT - 5))
         return;
-    if (r < 5 || r > 80)
+    if (r < 1 || r > 80)
         return;
 
     /* 十字准心: 7px 臂长 */

@@ -43,6 +43,12 @@ extern uint8_t g_target_detected;
 extern uint8_t g_target_center_x;
 extern uint8_t g_target_radius;
 extern uint8_t g_target_y_mid;
+extern uint8_t g_obstacle_detected;
+extern uint8_t g_obstacle_center_x;
+extern uint8_t g_obstacle_width;
+extern uint8_t g_obstacle_y_mid;
+extern uint8_t g_obstacle_left_edge;
+extern uint8_t g_obstacle_right_edge;
 extern uint8_t g_out_of_bounds;
 
 // 纯追踪输出 (供 control.c 使用)

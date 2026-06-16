@@ -9,6 +9,7 @@
 //   [1] Turn_To_Bin      — Otsu 大津法二值化 (阈值×1.075 偏置)
 //   [2] Image_Filter      — 8 邻域和阈值形态学滤波
 //   [3] Image_Draw_Rectan — 四周 2px 黑边框, 防追踪越界
+// [3.5] mask_target       — 靶子区域填充白色(赛道), 防止环壁干扰元素识别
 //   [4] Get_Start_Point   — 从图像中间向左右搜索黑白交界种子点
 //   [5] Search_L_R        — 双边同步 Moore 8 邻域追踪
 //   [6] Get_Left/Right    — 追踪点集 → 逐行边界数组
@@ -31,6 +32,12 @@
 #endif
 
 #include "vision_track.h"
+
+/* 靶子检测结果 (定义在 trail.c, 用于掩除靶子区域) */
+extern uint8_t g_target_detected;
+extern uint8_t g_target_center_x;
+extern uint8_t g_target_radius;
+extern uint8_t g_target_y_mid;
 
 #ifndef MT9V034_WIDTH
 #error "MT9V034_WIDTH not defined"
@@ -491,6 +498,11 @@ static void Search_L_R(uint16_t Break_Flag, uint8_t *image,
     uint8_t Temp_L[8][2];
     uint8_t Temp_R[8][2];
     uint8_t Index_L, Index_R;
+    /* 白像素优先选择变量 (Fix 1a) */
+    int8_t dx, dy;
+    uint8_t wx;
+    uint8_t best_w;
+    uint8_t found;
 
     L_Data_Statics = *L_Stastic;
     R_Data_Statics = *R_Stastic;
@@ -541,21 +553,48 @@ static void Search_L_R(uint16_t Break_Flag, uint8_t *image,
                 Index_L++;
                 Dir_L[L_Data_Statics - 1] = i;
             }
+        }
 
-            if (Index_L)
+        /* Fix 1a + Opt1+2: 单候选快速路径 — 跳过 3x3 白像素扫描 */
+        if (Index_L == 1)
+        {
+            Center_Point_L[0] = Temp_L[0][0];
+            Center_Point_L[1] = Temp_L[0][1];
+        }
+        else if (Index_L > 1)
+        {
+            /* 多候选: 选 3x3 白像素最多 (避免环壁暗区吸附) */
+            Center_Point_L[0] = Temp_L[0][0];
+            Center_Point_L[1] = Temp_L[0][1];
+            best_w = 0;
+            found = 0;
+            for (j = 0; j < Index_L; j++)
             {
-                Center_Point_L[0] = Temp_L[0][0];
-                Center_Point_L[1] = Temp_L[0][1];
-                for (j = 0; j < Index_L; j++)
+                wx = 0;
+                for (dy = -1; dy <= 1; dy++)
                 {
-                    if (Center_Point_L[1] > Temp_L[j][1])
+                    for (dx = -1; dx <= 1; dx++)
                     {
-                        Center_Point_L[0] = Temp_L[j][0];
-                        Center_Point_L[1] = Temp_L[j][1];
+                        int16_t npx = (int16_t)Temp_L[j][0] + (int16_t)dx;
+                        int16_t npy = (int16_t)Temp_L[j][1] + (int16_t)dy;
+                        if (npx < 0 || npx >= (int16_t)IMG_W ||
+                            npy < 0 || npy >= (int16_t)IMG_H)
+                            continue;
+                        if (image[(uint16_t)npy * IMG_W + (uint16_t)npx] == 255)
+                            wx++;
                     }
+                }
+                if ((wx > best_w) ||
+                    ((wx == best_w) && (found == 0 || Temp_L[j][1] < Center_Point_L[1])))
+                {
+                    best_w = wx;
+                    Center_Point_L[0] = Temp_L[j][0];
+                    Center_Point_L[1] = Temp_L[j][1];
+                    found = 1;
                 }
             }
         }
+        /* else: Index_L == 0, Center_Point_L keeps its previous value (will trigger stuck detection) */
 
         // 停滞检测: 连续3次同一点 → 退出
         if ((Points_R[R_Data_Statics][0] == Points_R[R_Data_Statics - 1][0]
@@ -611,18 +650,43 @@ static void Search_L_R(uint16_t Break_Flag, uint8_t *image,
                 Index_R++;
                 Dir_R[R_Data_Statics - 1] = i;
             }
+        }
 
-            if (Index_R)
+        /* Fix 1a + Opt1+2: 单候选快速路径 */
+        if (Index_R == 1)
+        {
+            Center_Point_R[0] = Temp_R[0][0];
+            Center_Point_R[1] = Temp_R[0][1];
+        }
+        else if (Index_R > 1)
+        {
+            Center_Point_R[0] = Temp_R[0][0];
+            Center_Point_R[1] = Temp_R[0][1];
+            best_w = 0;
+            found = 0;
+            for (j = 0; j < Index_R; j++)
             {
-                Center_Point_R[0] = Temp_R[0][0];
-                Center_Point_R[1] = Temp_R[0][1];
-                for (j = 0; j < Index_R; j++)
+                wx = 0;
+                for (dy = -1; dy <= 1; dy++)
                 {
-                    if (Center_Point_R[1] > Temp_R[j][1])
+                    for (dx = -1; dx <= 1; dx++)
                     {
-                        Center_Point_R[0] = Temp_R[j][0];
-                        Center_Point_R[1] = Temp_R[j][1];
+                        int16_t npx = (int16_t)Temp_R[j][0] + (int16_t)dx;
+                        int16_t npy = (int16_t)Temp_R[j][1] + (int16_t)dy;
+                        if (npx < 0 || npx >= (int16_t)IMG_W ||
+                            npy < 0 || npy >= (int16_t)IMG_H)
+                            continue;
+                        if (image[(uint16_t)npy * IMG_W + (uint16_t)npx] == 255)
+                            wx++;
                     }
+                }
+                if ((wx > best_w) ||
+                    ((wx == best_w) && (found == 0 || Temp_R[j][1] < Center_Point_R[1])))
+                {
+                    best_w = wx;
+                    Center_Point_R[0] = Temp_R[j][0];
+                    Center_Point_R[1] = Temp_R[j][1];
+                    found = 1;
                 }
             }
         }
@@ -697,16 +761,59 @@ static uint8_t Lose_Line(void)
 {
     int i;
     uint8_t Lose_Line_Point_L, Lose_Line_Point_R;
+    uint8_t prev_l, prev_r;
+    uint8_t stuck_run_l, stuck_run_r;
 
     Lose_Line_Point_L = 0;
     Lose_Line_Point_R = 0;
+    prev_l = 255;
+    prev_r = 255;
+    stuck_run_l = 0;
+    stuck_run_r = 0;
 
     for (i = (int)(IMG_H / 2 + 20); i > (int)(IMG_H / 2 - 20); i -= 1)
     {
+        /* 左边界: 贴边 ≤ 2 算 (Fix 1b: 加入常年贴边不算丢) */
         if (L_Border[i] <= (uint8_t)LOSE_LINE_L_TH)
-            Lose_Line_Point_L++;
+        {
+            if (prev_l != 255 && prev_l > (uint8_t)LOSE_LINE_L_TH + 5)
+            {
+                /* 从正常位置突然跳到贴边 → 真丢线 */
+                Lose_Line_Point_L++;
+            }
+            else if (stuck_run_l < 5)
+            {
+                /* 刚贴边, 连续 < 5 行才计 */
+                Lose_Line_Point_L++;
+            }
+            stuck_run_l++;
+        }
+        else
+        {
+            stuck_run_l = 0;
+        }
+        prev_l = L_Border[i];
+
+        /* 右边界: 贴边 ≥ 184 算 */
         if (R_Border[i] >= (uint8_t)LOSE_LINE_R_TH)
-            Lose_Line_Point_R++;
+        {
+            if (prev_r != 255 && prev_r < (uint8_t)LOSE_LINE_R_TH - 5)
+            {
+                /* 从正常位置突然跳到贴边 → 真丢线 */
+                Lose_Line_Point_R++;
+            }
+            else if (stuck_run_r < 5)
+            {
+                /* 刚贴边, 连续 < 5 行才计 */
+                Lose_Line_Point_R++;
+            }
+            stuck_run_r++;
+        }
+        else
+        {
+            stuck_run_r = 0;
+        }
+        prev_r = R_Border[i];
     }
 
     if (Lose_Line_Point_L >= 10 && Lose_Line_Point_R >= 10)
@@ -995,6 +1102,8 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
     uint8_t thr;
     int16_t mid_val;
     float err_f;
+    int16_t tgt_cx, tgt_cy, tgt_rm, tgt_dx, tgt_dy, tgt_rr;
+    uint16_t tgt_x0, tgt_x1, tgt_y0, tgt_y1, tgt_yy, tgt_xx;
 
     // 1. 二值化 (Turn_To_Bin: Otsu*1.075, bright→255=track)
     Turn_To_Bin(gray, bin, &thr);
@@ -1006,6 +1115,34 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
 
     // 3. 画黑边框 (Image_Draw_Rectan)
     Image_Draw_Rectan(bin);
+
+    // 3.5 靶子掩除: 将上一帧检测到的靶子区域填充为白色(赛道), 防止环壁干扰边界追踪
+    if (g_target_detected)
+    {
+        tgt_cx = (int16_t)g_target_center_x;
+        tgt_cy = (int16_t)g_target_y_mid;
+        tgt_rm = (int16_t)g_target_radius + 8;
+        if (tgt_rm < 12) tgt_rm = 12;
+        tgt_x0 = (uint16_t)(tgt_cx - tgt_rm);
+        if (tgt_x0 < 0) tgt_x0 = 0;
+        tgt_x1 = (uint16_t)(tgt_cx + tgt_rm);
+        if (tgt_x1 >= IMG_W) tgt_x1 = IMG_W - 1;
+        tgt_y0 = (uint16_t)(tgt_cy - tgt_rm);
+        if (tgt_y0 < 0) tgt_y0 = 0;
+        tgt_y1 = (uint16_t)(tgt_cy + tgt_rm);
+        if (tgt_y1 >= IMG_H) tgt_y1 = IMG_H - 1;
+        tgt_rr = tgt_rm * tgt_rm;
+        for (tgt_yy = tgt_y0; tgt_yy <= tgt_y1; tgt_yy++)
+        {
+            tgt_dy = (int16_t)tgt_yy - tgt_cy;
+            for (tgt_xx = tgt_x0; tgt_xx <= tgt_x1; tgt_xx++)
+            {
+                tgt_dx = (int16_t)tgt_xx - tgt_cx;
+                if (tgt_dx * tgt_dx + tgt_dy * tgt_dy <= tgt_rr)
+                    bin[tgt_yy * IMG_W + tgt_xx] = 255;
+            }
+        }
+    }
 
     // 4. 初始化边界追踪状态
     Data_Stastics_L = 0;
