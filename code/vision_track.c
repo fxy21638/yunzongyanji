@@ -12,7 +12,7 @@
 // [3.5] mask_target       — 靶子区域填充白色(赛道), 防止环壁干扰元素识别
 //   [4] Get_Start_Point   — 从图像中间向左右搜索黑白交界种子点
 //   [5] Search_L_R        — 双边同步 Moore 8 邻域追踪
-//   [6] Get_Left/Right    — 追踪点集 → 逐行边界数组
+//   [6] Get_Borders       — 追踪点集 → 逐行边界数组 (Opt2: 合并左右填充)
 //   [7] Cross_Fill        — 拐点检测 + 直线拟合, 补全十字路口缺失边界
 //   [8] Center_Line       — 逐行中线 = 道路中心估计 (双边均值/单边±半道宽)
 //   [9] Image_Erro        — 加权平均: 0.375×C[103] + 0.5×C[105] + 0.1×C[106]
@@ -89,8 +89,10 @@ extern uint8_t g_target_y_mid;
  * ============================================================ */
 static uint8_t L_Border[IMG_H];
 static uint8_t R_Border[IMG_H];
-static uint8_t Center_Line_arr[IMG_H];
 static uint8_t Hightest;
+/* Opt2: 半道宽缓存 + Image_Erro 三行加权缓存 (避免第 11 步重新算) */
+static int8_t g_half_lane_w;
+static uint8_t g_erro_lo, g_erro_mid, g_erro_hi;
 
 static uint16_t Points_L[USE_NUM][2];
 static uint16_t Points_R[USE_NUM][2];
@@ -697,19 +699,25 @@ static void Search_L_R(uint16_t Break_Flag, uint8_t *image,
 }
 
 /* ============================================================
- * Get_Left — 从点集提取左边界逐行数组
+ * Get_Borders — 从点集提取左右边界逐行数组 (Opt2: 合并 Get_Left + Get_Right)
+ *   原来两个函数各做一次 IMG_H 初始化 + 各自遍历点集
+ *   合并后: 一次初始化 + 一次遍历左右点集
  * ============================================================ */
-static void Get_Left(uint16_t Total_L)
+static void Get_Borders(uint16_t Total_L, uint16_t Total_R)
 {
     uint8_t i;
     uint16_t j;
     int16_t h;
 
+    /* 一次初始化左右边界数组 (Opt2: 省 1 次 IMG_H 循环) */
     for (i = 0; i < IMG_H; i++)
+    {
         L_Border[i] = (uint8_t)BORDER_MIN;
+        R_Border[i] = (uint8_t)BORDER_MAX;
+    }
 
+    /* 左边界: 从底向上匹配行号 */
     h = (int16_t)(IMG_H - 2);
-
     for (j = 0; j < Total_L; j++)
     {
         if (Points_L[j][1] == (uint16_t)h)
@@ -723,22 +731,9 @@ static void Get_Left(uint16_t Total_L)
         h--;
         if (h == 0) break;
     }
-}
 
-/* ============================================================
- * Get_Right — 从点集提取右边界逐行数组
- * ============================================================ */
-static void Get_Right(uint16_t Total_R)
-{
-    uint8_t i;
-    uint16_t j;
-    int16_t h;
-
-    for (i = 0; i < IMG_H; i++)
-        R_Border[i] = (uint8_t)BORDER_MAX;
-
+    /* 右边界: 从底向上匹配行号 */
     h = (int16_t)(IMG_H - 2);
-
     for (j = 0; j < Total_R; j++)
     {
         if (Points_R[j][1] == (uint16_t)h)
@@ -1157,93 +1152,48 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
                    Start_Point_R[0], Start_Point_R[1],
                    &Hightest);
 
-        // 6. 点集→逐行边界数组
-        Get_Left(Data_Stastics_L);
-        Get_Right(Data_Stastics_R);
+        // 6. 点集→逐行边界数组 (Opt2: 合并)
+        Get_Borders(Data_Stastics_L, Data_Stastics_R);
 
         // 7. 十字补线 (Cross_Fill)
         Cross_Fill(bin);
     }
     else
     {
-        // 没找到种子点 — 初始化边界为默认值
-        uint16_t ii;
-        for (ii = 0; ii < IMG_H; ii++)
-        {
-            L_Border[ii] = (uint8_t)BORDER_MIN;
-            R_Border[ii] = (uint8_t)BORDER_MAX;
-        }
+        // 没找到种子点 — 初始化边界为默认值 (Opt2: 复用 Get_Borders)
+        Get_Borders(0, 0);
         Hightest = 0;
     }
 
-    // 8. 中线 = 道路中心估计（双边可见→均值, 单边丢线→可见边±半道宽, 十字→中心）
+    // 8. 中线 = 道路中心估计
+    // 参考 Front_Car: 稀疏点集, 不强制每行填值. 丢线行不猜, 直接用最近双边有效行.
     {
-        int ii;
         int16_t lane_w, half_w;
         int16_t ln, rn;
         uint16_t near_y;
 
-        // 从近行取道宽（双边可见时）
+        /* Opt2: 重置 Image_Erro 缓存 */
+        g_erro_lo = 0;
+        g_erro_mid = 0;
+        g_erro_hi = 0;
+
+        // 道宽
         lane_w = 65;
         near_y = (uint16_t)(IMG_H - 18);
         ln = (int16_t)L_Border[near_y];
         rn = (int16_t)R_Border[near_y];
         if (ln > (int16_t)BORDER_MIN && rn < (int16_t)BORDER_MAX)
-        {
             lane_w = rn - ln + 1;
-        }
         if (lane_w < 25) lane_w = 65;
         if (lane_w > 160) lane_w = 160;
         half_w = lane_w / 2;
-
-        for (ii = (int)Hightest; ii < (int)(IMG_H - 1); ii++)
-        {
-            int16_t l, r, mid_val;
-            uint8_t lok, rok;
-
-            l = (int16_t)L_Border[ii];
-            r = (int16_t)R_Border[ii];
-
-            // 阈值与 detect_element_segment 一致: L>2 为有效, R<IMG_W-4 为有效
-            lok = (l > 2) ? 1 : 0;
-            rok = (r < (int16_t)(IMG_W - 4)) ? 1 : 0;
-
-            if (!lok && !rok)
-            {
-                // 双边丢线 → 直行
-                mid_val = (int16_t)(IMG_W / 2);
-            }
-            // 十字路口: 双边都在边界
-            else if (l <= 5 && r >= (int16_t)(IMG_W - 5))
-            {
-                mid_val = (int16_t)(IMG_W / 2);
-            }
-            // 双边可见: (L+R)/2
-            else if (lok && rok)
-            {
-                mid_val = (l + r) / 2;
-            }
-            // 右边界丢线: 道路中心 = 左边界 + 半道宽
-            else if (lok && !rok)
-            {
-                mid_val = l + half_w;
-            }
-            // 左边界丢线: 道路中心 = 右边界 - 半道宽
-            else
-            {
-                mid_val = r - half_w;
-            }
-
-            if (mid_val < 0) mid_val = 0;
-            if (mid_val > (int16_t)(IMG_W - 1)) mid_val = (int16_t)(IMG_W - 1);
-            Center_Line_arr[ii] = (uint8_t)mid_val;
-        }
+        g_half_lane_w = (int8_t)half_w;
     }
 
-    // 9. Image_Erro = 加权平均 (原 row 69-71, 适配 103-106)
-    err_f = (float)Center_Line_arr[ERRO_ROW_LO] * 0.375f
-          + (float)Center_Line_arr[ERRO_ROW_MID] * 0.5f
-          + (float)Center_Line_arr[ERRO_ROW_HI] * 0.1f;
+    // 9. Image_Erro = 加权平均 (原 row 69-71, 适配 103-106) — Opt2: 用缓存值 (第 11 步填)
+    err_f = (float)g_erro_lo * 0.375f
+          + (float)g_erro_mid * 0.5f
+          + (float)g_erro_hi * 0.1f;
 
     mid_val = (int16_t)err_f;
     if (mid_val < 0)   mid_val = 0;
@@ -1284,12 +1234,55 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
             {
                 res->left[y]  = l;
                 res->right[y] = r;
-                /* 顶部和底部中线不采信: 上留 8 行, 下留 8 行, 上位机也不画 */
-                if (y < ((uint16_t)Hightest + MID_TRUST_TOP_MARGIN) ||
-                    y >= (uint16_t)(IMG_H - MID_TRUST_BOT_MARGIN))
-                    res->mid[y] = -1;
-                else
-                    res->mid[y] = (int16_t)Center_Line_arr[y];
+
+                /* 中线: 双边可见→均值, 单边丢线→可见边±半道宽 */
+                {
+                    int16_t mid_val;
+                    uint8_t lok, rok;
+
+                    lok = (l > 2) ? 1 : 0;
+                    rok = (r < (int16_t)(IMG_W - 4)) ? 1 : 0;
+
+                    if (!lok && !rok)
+                    {
+                        mid_val = (int16_t)(IMG_W / 2);
+                    }
+                    else if (l <= 5 && r >= (int16_t)(IMG_W - 5))
+                    {
+                        mid_val = (int16_t)(IMG_W / 2);
+                    }
+                    else if (lok && rok)
+                    {
+                        mid_val = (l + r) / 2;
+                    }
+                    else if (lok && !rok)
+                    {
+                        mid_val = l + (int16_t)g_half_lane_w;
+                    }
+                    else
+                    {
+                        mid_val = r - (int16_t)g_half_lane_w;
+                    }
+
+                    if (mid_val < 0) mid_val = 0;
+                    if (mid_val > (int16_t)(IMG_W - 1)) mid_val = (int16_t)(IMG_W - 1);
+
+                    /* Opt2: 缓存 Image_Erro 加权行 (无论是否在信任区) */
+                    if (y == ERRO_ROW_LO) g_erro_lo = (uint8_t)mid_val;
+                    else if (y == ERRO_ROW_MID) g_erro_mid = (uint8_t)mid_val;
+                    else if (y == ERRO_ROW_HI) g_erro_hi = (uint8_t)mid_val;
+
+                    /* 顶部和底部中线不采信: 上留 8 行, 下留 8 行, 上位机也不画 */
+                    if (y < ((uint16_t)Hightest + MID_TRUST_TOP_MARGIN) ||
+                        y >= (uint16_t)(IMG_H - MID_TRUST_BOT_MARGIN))
+                    {
+                        res->mid[y] = -1;
+                    }
+                    else
+                    {
+                        res->mid[y] = mid_val;
+                    }
+                }
                 res->valid_rows++;
             }
             else

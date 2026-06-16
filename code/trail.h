@@ -73,4 +73,7 @@ extern uint8_t g_seg_num;
 /* ---- 中线限幅 (供 ring_fsm 使用) ---- */
 uint8_t clamp_center_to_target(int16_t center_x);
 
+/* ---- 角点检测 (供 ring_fsm 环岛入口确认) ---- */
+uint8_t has_boundary_corner(int16_t *border);
+
 #endif

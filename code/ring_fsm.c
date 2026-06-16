@@ -486,9 +486,10 @@ TRACK_ELEMENT ring_fsm_process(ring_fsm_t *rf, TRACK_ELEMENT seg_elem)
 
     if (rf->state == RING_CENTER)
     {
-        /* 环岛中心: 任一侧出现分叉 → 路汇合, 出环岛 */
+        /* 环岛中心: 任一侧出现分叉 → 路汇合, 出环岛
+           参考 Front_Car: 需累计转角 > 阈值才能确认退出, 防止叉口误触发 */
         ring_check = detect_ring_from_segments();
-        if (ring_check != NONE)
+        if (ring_check != NONE && cnt_degree >= RING_EXIT_DEGREE_MIN)
         {
             rf->state = RING_IDLE;
             return STRAIGHT;
@@ -496,27 +497,37 @@ TRACK_ELEMENT ring_fsm_process(ring_fsm_t *rf, TRACK_ELEMENT seg_elem)
         return RING_c;
     }
 
-    /* ---- 入口检测: 不在环岛中, 检查是否进入环岛 ----
-       段分类看起来像直道或转弯, 但存在分叉+上方有路 → 环岛入口
-       条件1(边界终点)+条件2(上方有路) 在 detect_ring() 内部同时验证 */
-    if (seg_elem == STRAIGHT)
+    /* ---- 入口检测: 两阶段 (段分叉预警 + 角点不对称确认) ----
+       参考 Front_Car: 环岛入口 = 一侧有角点 + 对侧是直道
+       阶段1: detect_ring() 检测段分叉/边界突变 → 环岛候选
+       阶段2: has_boundary_corner() 确认不对称 → 才真正进入环岛 */
+    if (seg_elem == STRAIGHT || seg_elem == RIGHT_ANGLE_l || seg_elem == RIGHT_ANGLE_r)
     {
-        ring_check = detect_ring();
-        if (ring_check == RING_l)
+        ring_check = detect_ring(); /* 阶段1: 段分叉预警 */
+        if (ring_check != NONE)
         {
-            rf->state = RING_ENTER_l;
-            rf->entry_yaw = yaw;
-            cnt_degree = 0;
-            ring_start_yaw = yaw;
-            return RING_l;
-        }
-        if (ring_check == RING_r)
-        {
-            rf->state = RING_ENTER_r;
-            rf->entry_yaw = yaw;
-            cnt_degree = 0;
-            ring_start_yaw = yaw;
-            return RING_r;
+            uint8_t left_cnr, right_cnr;
+            left_cnr = has_boundary_corner(g_track.left);
+            right_cnr = has_boundary_corner(g_track.right);
+
+            /* 阶段2: 角点不对称确认 (一侧角点 + 对侧无角点) */
+            if (ring_check == RING_l && left_cnr && !right_cnr)
+            {
+                rf->state = RING_ENTER_l;
+                rf->entry_yaw = yaw;
+                cnt_degree = 0;
+                ring_start_yaw = yaw;
+                return RING_l;
+            }
+            if (ring_check == RING_r && right_cnr && !left_cnr)
+            {
+                rf->state = RING_ENTER_r;
+                rf->entry_yaw = yaw;
+                cnt_degree = 0;
+                ring_start_yaw = yaw;
+                return RING_r;
+            }
+            /* 不对称条件不满足 → 忽略环岛候选, 保持原分类 */
         }
     }
 

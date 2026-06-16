@@ -46,7 +46,8 @@ uint8_t       ring_fsm_get_target(const ring_fsm_t *rf);                 /* 当�
 uint8_t       ring_fsm_is_active(const ring_fsm_t *rf);                  /* 是否处于环岛状态 */
 void          ring_fsm_reset(ring_fsm_t *rf);                            /* 强制重置到 IDLE */
 
-/* ---- 环岛中心切换阈值 (毫度) ---- */
-#define RING_CENTER_DEGREE   25000
+/* ---- 环岛状态切换阈值 (毫度) ---- */
+#define RING_CENTER_DEGREE   25000   /* ENTER→CENTER: 转过 25° 进入环岛中心 */
+#define RING_EXIT_DEGREE_MIN 90000   /* CENTER→IDLE: 最少转过 90° 才能退出, 防叉口误触发 */
 
 #endif

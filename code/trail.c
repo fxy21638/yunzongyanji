@@ -790,6 +790,33 @@ static void segment_merge(void)
 }
 
 /* ---------- 基于分段的元素检测 ---------- */
+/* 角点检测: 边界在窗口内的最大水平偏移.
+   偏移超过阈值 → 存在真角点; 否则是平滑弯道.
+   用于门控 detect_element_segment 的 RIGHT_ANGLE 分类
+   和 ring_fsm 的环岛入口确认. */
+uint8_t has_boundary_corner(int16_t *border)
+{
+    int16_t max_shift;
+    int16_t shift;
+    int i;
+    int16_t prev, next;
+
+    max_shift = 0;
+    for (i = 6; i < (int)(MT9V034_HEIGHT - 6); i++)
+    {
+        prev = border[i - 6];
+        next = border[i + 6];
+        if (prev > 0 && next > 0)
+        {
+            shift = next - prev;
+            if (shift < 0) shift = (int16_t)(-shift);
+            if (shift > max_shift) max_shift = shift;
+        }
+    }
+    return (max_shift > 12) ? 1 : 0;
+}
+
+
 static TRACK_ELEMENT detect_element_segment(void)
 {
     int8_t s0, s1;
@@ -799,6 +826,7 @@ static TRACK_ELEMENT detect_element_segment(void)
     uint8_t near_left_ok, near_right_ok;
     uint8_t far_left_ok, far_right_ok;
     int16_t c_near, c_far, dx;
+    TRACK_ELEMENT result;
 
     row_classify_refine(); /* 基础分类已内联, 单遍扫描完成 */
     segment_merge();
@@ -810,100 +838,90 @@ static TRACK_ELEMENT detect_element_segment(void)
 
     s0 = g_seg_type[0];
     s1 = (n >= 2) ? g_seg_type[1] : ROW_INVALID;
+    result = STRAIGHT; /* 默认直道 */
 
     /* 段0=双边正常 → 看段1 */
     if (s0 == ROW_BOTH)
     {
         if (s1 == ROW_WIDE)
-            return CROSS;
-        if (s1 == ROW_LEFT_JUMP || s1 == ROW_RIGHT_JUMP)
-            return STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
-        if (s1 == ROW_LEFT_LOST)
-            return RIGHT_ANGLE_l;
-        if (s1 == ROW_RIGHT_LOST)
-            return RIGHT_ANGLE_r;
-        if (s1 == ROW_DIVERGE)
-            return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
-        /* s1 不显著 → 落到双行比较确认 (平滑弯道分段看不出) */
+            result = CROSS;
+        else if (s1 == ROW_LEFT_JUMP || s1 == ROW_RIGHT_JUMP)
+            result = STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
+        else if (s1 == ROW_LEFT_LOST)
+            result = RIGHT_ANGLE_l;
+        else if (s1 == ROW_RIGHT_LOST)
+            result = RIGHT_ANGLE_r;
+        else if (s1 == ROW_DIVERGE)
+            result = STRAIGHT;
+        /* s1 不显著 → 落到双行比较确认 */
     }
     else if (s0 == ROW_WIDE)
-        return CROSS;
+        result = CROSS;
     else if (s0 == ROW_LEFT_LOST)
-        return RIGHT_ANGLE_l;
+        result = RIGHT_ANGLE_l;
     else if (s0 == ROW_RIGHT_LOST)
-        return RIGHT_ANGLE_r;
+        result = RIGHT_ANGLE_r;
     else if (s0 == ROW_DIVERGE)
-        return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
+        result = STRAIGHT;
     else if (s0 == ROW_LEFT_JUMP || s0 == ROW_RIGHT_JUMP)
-        return STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
+        result = STRAIGHT;
 
-    /* ---- 双行比较 (分段无法判定时, 远行上移提前判弯) ---- */
-    near_y = (uint16_t)(MT9V034_HEIGHT - 20);
-    far_y = (uint16_t)(MT9V034_HEIGHT / 2); /* y=60, 比默认85看得更远 */
-
-    l_near = g_track.left[near_y];
-    r_near = g_track.right[near_y];
-    l_far = g_track.left[far_y];
-    r_far = g_track.right[far_y];
-
-    if (l_near < 0 || r_near < 0 || l_far < 0 || r_far < 0)
-        return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
-
-    near_left_ok = (l_near > 2) ? 1 : 0;
-    near_right_ok = (r_near < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
-    far_left_ok = (l_far > 2) ? 1 : 0;
-    far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
-
-    if (!near_left_ok && !near_right_ok)
-        return STRAIGHT; /* 原 BROKEN → 本次比赛无断桥, 改 STRAIGHT */
-
-    if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
+    /* ---- 双行比较 ---- */
+    if (result == STRAIGHT)
     {
-        if ((l_near - l_far) > 8 && (r_far - r_near) > 8)
-            return CROSS;
-    }
+        near_y = (uint16_t)(MT9V034_HEIGHT - 20);
+        far_y = (uint16_t)(MT9V034_HEIGHT / 2);
 
-    if (near_left_ok && near_right_ok)
-    {
-        if (far_left_ok && !far_right_ok)
+        l_near = g_track.left[near_y];
+        r_near = g_track.right[near_y];
+        l_far = g_track.left[far_y];
+        r_far = g_track.right[far_y];
+
+        if (l_near < 0 || r_near < 0 || l_far < 0 || r_far < 0)
+            result = STRAIGHT;
+        else
         {
-            if (l_far > 10)
-                return RIGHT_ANGLE_r;
+            near_left_ok = (l_near > 2) ? 1 : 0;
+            near_right_ok = (r_near < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
+            far_left_ok = (l_far > 2) ? 1 : 0;
+            far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
+
+            if (!near_left_ok && !near_right_ok)
+                result = STRAIGHT;
+            else if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
+            {
+                if ((l_near - l_far) > 8 && (r_far - r_near) > 8)
+                    result = CROSS;
+                else
+                {
+                    c_near = (l_near + r_near) / 2;
+                    c_far = (l_far + r_far) / 2;
+                    dx = c_far - c_near;
+                    if (dx > 5) result = RIGHT_ANGLE_r;
+                    else if (dx < -5) result = RIGHT_ANGLE_l;
+                }
+            }
+            else if (near_left_ok && near_right_ok)
+            {
+                if (far_left_ok && !far_right_ok && l_far > 10) result = RIGHT_ANGLE_r;
+                else if (!far_left_ok && far_right_ok && r_far < (int16_t)(MT9V034_WIDTH - 10)) result = RIGHT_ANGLE_l;
+            }
+            else if (near_left_ok && far_left_ok)
+            {
+                dx = l_far - l_near;
+                if (dx > 5) result = RIGHT_ANGLE_r;
+                else if (dx < -5) result = RIGHT_ANGLE_l;
+            }
+            else if (near_right_ok && far_right_ok)
+            {
+                dx = r_far - r_near;
+                if (dx > 5) result = RIGHT_ANGLE_r;
+                else if (dx < -5) result = RIGHT_ANGLE_l;
+            }
         }
-        if (!far_left_ok && far_right_ok)
-        {
-            if (r_far < (int16_t)(MT9V034_WIDTH - 10))
-                return RIGHT_ANGLE_l;
-        }
-        if (far_left_ok && far_right_ok)
-        {
-            c_near = (l_near + r_near) / 2;
-            c_far = (l_far + r_far) / 2;
-            dx = c_far - c_near;
-            if (dx > 5)
-                return RIGHT_ANGLE_r;
-            if (dx < -5)
-                return RIGHT_ANGLE_l;
-        }
-    }
-    else if (near_left_ok && far_left_ok)
-    {
-        dx = l_far - l_near;
-        if (dx > 5)
-            return RIGHT_ANGLE_r;
-        if (dx < -5)
-            return RIGHT_ANGLE_l;
-    }
-    else if (near_right_ok && far_right_ok)
-    {
-        dx = r_far - r_near;
-        if (dx > 5)
-            return RIGHT_ANGLE_r;
-        if (dx < -5)
-            return RIGHT_ANGLE_l;
     }
 
-    return STRAIGHT;
+    return result;
 }
 
 /* ================================================================
