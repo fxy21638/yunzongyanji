@@ -93,6 +93,7 @@ static uint8_t Hightest;
 /* Opt2: 半道宽缓存 + Image_Erro 三行加权缓存 (避免第 11 步重新算) */
 static int8_t g_half_lane_w;
 static uint8_t g_erro_lo, g_erro_mid, g_erro_hi;
+static uint16_t g_last_lane_w; /* 上一帧有效道宽, 测量失败时沿用 */
 
 static uint16_t Points_L[USE_NUM][2];
 static uint16_t Points_R[USE_NUM][2];
@@ -1177,13 +1178,29 @@ void vision_track_process(uint8_t *gray, uint8_t *bin,
         g_erro_mid = 0;
         g_erro_hi = 0;
 
-        // 道宽
+        // 道宽 — 双边可见时实测, 否则沿用上一帧 (防止测量失败用默认 65)
         lane_w = 65;
         near_y = (uint16_t)(IMG_H - 18);
         ln = (int16_t)L_Border[near_y];
         rn = (int16_t)R_Border[near_y];
         if (ln > (int16_t)BORDER_MIN && rn < (int16_t)BORDER_MAX)
+        {
             lane_w = rn - ln + 1;
+            if (lane_w >= 25 && lane_w <= 160)
+                g_last_lane_w = (uint16_t)lane_w; /* 记录有效道宽 */
+        }
+        else if (g_last_lane_w > 0)
+        {
+            lane_w = (int16_t)g_last_lane_w; /* 双边测量失败 → 沿用上一帧 */
+        }
+        else
+        {
+            /* 全图无双边: 用可见边+图像中心估算道宽 */
+            if (ln > (int16_t)BORDER_MIN)
+                lane_w = 2 * ((int16_t)(IMG_W / 2) - ln);
+            else if (rn < (int16_t)BORDER_MAX)
+                lane_w = 2 * (rn - (int16_t)(IMG_W / 2));
+        }
         if (lane_w < 25) lane_w = 65;
         if (lane_w > 160) lane_w = 160;
         half_w = lane_w / 2;

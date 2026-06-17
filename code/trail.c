@@ -896,6 +896,9 @@ static TRACK_ELEMENT detect_element_segment(void)
                 {
                     c_near = (l_near + r_near) / 2;
                     c_far = (l_far + r_far) / 2;
+                    /* 限位: 边界数组若混入无效值, dx 会偏到 ±127, 触发误判 */
+                    if (c_near < 4 || c_near > (int16_t)(MT9V034_WIDTH - 4)) c_near = 94;
+                    if (c_far < 4 || c_far > (int16_t)(MT9V034_WIDTH - 4)) c_far = 94;
                     dx = c_far - c_near;
                     if (dx > 5) result = RIGHT_ANGLE_r;
                     else if (dx < -5) result = RIGHT_ANGLE_l;
@@ -909,12 +912,16 @@ static TRACK_ELEMENT detect_element_segment(void)
             else if (near_left_ok && far_left_ok)
             {
                 dx = l_far - l_near;
+                /* 限位: 防止 l_far 存了 -1 或 188 导致 dx 异常 */
+                if (l_far < 0 || l_far > (int16_t)(MT9V034_WIDTH - 1)) dx = 0;
                 if (dx > 5) result = RIGHT_ANGLE_r;
                 else if (dx < -5) result = RIGHT_ANGLE_l;
             }
             else if (near_right_ok && far_right_ok)
             {
                 dx = r_far - r_near;
+                /* 限位: 防止 r_far 存了 -1 导致 dx 异常 */
+                if (r_far < 0 || r_far > (int16_t)(MT9V034_WIDTH - 1)) dx = 0;
                 if (dx > 5) result = RIGHT_ANGLE_r;
                 else if (dx < -5) result = RIGHT_ANGLE_l;
             }
