@@ -38,6 +38,7 @@ float speed_l = 0;
 float speed_r = 0;
 float speed_now_l = 0;
 float speed_now_r = 0;
+static float g_steer_output = 0.0f;  /* 供差速辅助使用 */
 static uint8_t speed_tune_mode = 0;
 
 /* 陀螺仪 Z 轴积分: 追踪环岛已转过角度 */
@@ -94,6 +95,20 @@ static void control_timer_callback(void)
     motor_speed_control();
 #endif
     steering_control();
+
+    /* 差速辅助: 高速时舵机跟不上, 用左右轮差速辅助转向
+       正 steer_output=右转 → 右轮减速, 左轮加速 */
+    {
+        float avg_speed;
+        float diff;
+        avg_speed = (speed_now_l + speed_now_r) * 0.5f;
+        diff = g_steer_output * avg_speed * 0.05f;  /* 增益 5%/度 */
+        if (diff > avg_speed * 0.4f) diff = avg_speed * 0.4f;
+        if (diff < -avg_speed * 0.4f) diff = -avg_speed * 0.4f;
+        speed_now_l += diff;
+        speed_now_r -= diff;
+    }
+
     Set_PWM((int16_t)speed_now_l, (int16_t)speed_now_r);
 }
 
@@ -155,6 +170,26 @@ void motor_speed_control(void)
     if (track_err < 0.0f) track_err = -track_err;
     err_reduction = SPEED_ERR_COEFF * track_err;
     target_speed = (speed_base - err_reduction) * spd_factor * fsm_speed;
+
+    /* 靶子检测到时减速打靶: 越近(半径越大)越慢 */
+    if (g_target_detected)
+    {
+        float target_slow;
+        target_slow = 1.0f - (float)g_target_radius * 0.025f; /* r=40→0, r=8→0.8 */
+        if (target_slow < 0.3f) target_slow = 0.3f;
+        if (target_slow > 1.0f) target_slow = 1.0f;
+        target_speed *= target_slow;
+    }
+
+    /* 障碍检测到时减速避障: 越近(宽度越大)越慢 */
+    if (g_obstacle_detected)
+    {
+        float obs_slow;
+        obs_slow = 1.0f - (float)g_obstacle_width * 0.015f; /* w=60→0.1, w=20→0.7 */
+        if (obs_slow < 0.2f) obs_slow = 0.2f;
+        if (obs_slow > 1.0f) obs_slow = 1.0f;
+        target_speed *= obs_slow;
+    }
 
     if (target_speed < SPEED_MIN)
         target_speed = SPEED_MIN;
@@ -310,12 +345,12 @@ void steering_control(void)
         fsm_angle_imax = cfg->angle_imax;
         fsm_angle_w  = cfg->angle_weight;
 
-        /* 速度自适应: 高速时略微增大转向增益 */
+        /* 速度自适应: 高速时增大转向增益防止跟丢 */
         {
             float eff_speed;
             eff_speed = speed_base * trail_speed_factor() * cfg->speed_factor;
-            speed_scale = 1.0f + (eff_speed - 25.0f) * 0.005f;
-            if (speed_scale > 1.18f) speed_scale = 1.18f;
+            speed_scale = 1.0f + (eff_speed - 25.0f) * 0.008f;
+            if (speed_scale > 1.50f) speed_scale = 1.50f;
             if (speed_scale < 1.0f) speed_scale = 1.0f;
             fsm_Kp *= speed_scale;
             fsm_Kd *= speed_scale;
@@ -365,6 +400,7 @@ void steering_control(void)
 
     steer_output = steer_smooth * (1.0f - cfg->ema_alpha) + steer_output * cfg->ema_alpha;
     steer_smooth = steer_output;
+    g_steer_output = steer_output;  /* 供差速辅助 */
 
     servo_set_wheel_angle(steer_output);
     }

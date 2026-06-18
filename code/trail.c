@@ -50,8 +50,8 @@ extern uint8_t xdata mt9v034_image[MT9V034_HEIGHT][MT9V034_WIDTH];
 #define CROSS_TOUCH_MARGIN 4
 #define CROSS_WIDE_EXTRA_NUM 5
 
-/* 转弯目标偏置: 向弯道内侧偏移, 越大切入越深 (3~10) */
-#define TRACK_TURN_BIAS 6
+/* 转弯目标偏置: 向弯道内侧偏移, 道宽的 1/8 (原固定 6px 太小) */
+#define TRACK_TURN_BIAS_RATIO 8
 
 /* 纯追踪参数 */
 #define PP_LOOKAHEAD_MIN 12  /* 最短前瞻距离 (像素) */
@@ -896,9 +896,6 @@ static TRACK_ELEMENT detect_element_segment(void)
                 {
                     c_near = (l_near + r_near) / 2;
                     c_far = (l_far + r_far) / 2;
-                    /* 限位: 边界数组若混入无效值, dx 会偏到 ±127, 触发误判 */
-                    if (c_near < 4 || c_near > (int16_t)(MT9V034_WIDTH - 4)) c_near = 94;
-                    if (c_far < 4 || c_far > (int16_t)(MT9V034_WIDTH - 4)) c_far = 94;
                     dx = c_far - c_near;
                     if (dx > 5) result = RIGHT_ANGLE_r;
                     else if (dx < -5) result = RIGHT_ANGLE_l;
@@ -906,26 +903,57 @@ static TRACK_ELEMENT detect_element_segment(void)
             }
             else if (near_left_ok && near_right_ok)
             {
-                if (far_left_ok && !far_right_ok && l_far > 10) result = RIGHT_ANGLE_r;
-                else if (!far_left_ok && far_right_ok && r_far < (int16_t)(MT9V034_WIDTH - 10)) result = RIGHT_ANGLE_l;
+                /* 近行双边可见, 远行单边丢: 用可见边的偏移方向判弯
+                   原假设: 右丢→右转, 左丢→左转 — 但左转弯道左侧移左也会丢右!
+                   改用可见边方向: L右移(dx>0)→右转, L左移(dx<0)→左转 */
+                if (far_left_ok && !far_right_ok)
+                {
+                    dx = l_far - l_near;
+                    if (dx > 5) result = RIGHT_ANGLE_r;
+                    else if (dx < -5) result = RIGHT_ANGLE_l;
+                }
+                else if (!far_left_ok && far_right_ok)
+                {
+                    dx = r_far - r_near;
+                    if (dx > 5) result = RIGHT_ANGLE_r;
+                    else if (dx < -5) result = RIGHT_ANGLE_l;
+                }
             }
             else if (near_left_ok && far_left_ok)
             {
                 dx = l_far - l_near;
-                /* 限位: 防止 l_far 存了 -1 或 188 导致 dx 异常 */
-                if (l_far < 0 || l_far > (int16_t)(MT9V034_WIDTH - 1)) dx = 0;
                 if (dx > 5) result = RIGHT_ANGLE_r;
                 else if (dx < -5) result = RIGHT_ANGLE_l;
             }
             else if (near_right_ok && far_right_ok)
             {
                 dx = r_far - r_near;
-                /* 限位: 防止 r_far 存了 -1 导致 dx 异常 */
-                if (r_far < 0 || r_far > (int16_t)(MT9V034_WIDTH - 1)) dx = 0;
                 if (dx > 5) result = RIGHT_ANGLE_r;
                 else if (dx < -5) result = RIGHT_ANGLE_l;
             }
         }
+
+    /* ---- 角点门控: 参考 Front_Car ----
+       段分叉可能因 dx 异常误判, 用角点检测二次确认.
+       一侧有真角点 + 对侧无 → 弯曲方向 */
+    if (result == RIGHT_ANGLE_l || result == RIGHT_ANGLE_r)
+    {
+        uint8_t l_corner, r_corner;
+        l_corner = has_boundary_corner(g_track.left);
+        r_corner = has_boundary_corner(g_track.right);
+
+        /* 角点确认: 一侧有角点 + 对侧没有 → 真转弯, 否则降级直道 */
+        if (result == RIGHT_ANGLE_l)
+        {
+            /* 左转需要左边界有角点 (弯道鼓出侧) */
+            if (!l_corner) result = STRAIGHT;
+        }
+        else /* RIGHT_ANGLE_r */
+        {
+            /* 右转需要右边界有角点 */
+            if (!r_corner) result = STRAIGHT;
+        }
+    }
     }
 
     return result;
@@ -1543,7 +1571,20 @@ static uint8_t compute_combined_aim(void)
         return CENTER_POINT;
 
     if (t_det && !o_det)
-        return t_cx;
+    {
+        /* 吸引到靶子前方: 偏置量 = 靶子半径 × 2 (越近偏越多)
+           靶子在左 → 瞄准靶子右侧; 靶子在右 → 瞄准靶子左侧 */
+        int16_t offset;
+        offset = (int16_t)g_target_radius * 2;
+        if (offset < 8) offset = 8;
+        if ((int16_t)t_cx < (int16_t)CENTER_POINT)
+            aim = (int16_t)t_cx + offset;
+        else
+            aim = (int16_t)t_cx - offset;
+        if (aim < 5) aim = 5;
+        if (aim > (int16_t)(MT9V034_WIDTH - 5)) aim = (int16_t)(MT9V034_WIDTH - 5);
+        return (uint8_t)aim;
+    }
 
     if (o_det && !t_det)
     {
@@ -1644,7 +1685,14 @@ static uint8_t plan_straight_center(void)
     far_mid = find_mid_at_or_above(TRACK_LOOKAHEAD_Y_FAR);
     if (near_mid >= 0 && far_mid >= 0)
     {
-        target = (int16_t)((near_mid * 2 + far_mid) / 3);
+        int16_t dx;
+        target = (int16_t)((near_mid + far_mid * 2) / 3);
+        /* 前瞻偏置: 远行偏右→提前右靠, 远行偏左→提前左靠 (入弯预判) */
+        dx = far_mid - near_mid;
+        if (dx > 3)
+            target += 10;
+        else if (dx < -3)
+            target -= 10;
         return clamp_center_to_target(target);
     }
     if (g_track.center_x >= 0)
@@ -1715,11 +1763,19 @@ static uint8_t plan_turn_center(TRACK_ELEMENT turn_type)
         target = r_far - lane_w / 2;
     }
 
-    /* 向弯道内侧偏移, 增大切入力度 */
-    if (turn_type == RIGHT_ANGLE_r)
-        target += (int16_t)TRACK_TURN_BIAS;
-    else if (turn_type == RIGHT_ANGLE_l)
-        target -= (int16_t)TRACK_TURN_BIAS;
+    /* 向弯道内侧偏移 (道宽比例, 原固定 6px 太小)
+       error = 94 - target: target偏右→左打; target偏左→右打
+       右转向左偏(切入内侧), 左转向右偏(切入内侧) */
+    {
+        int16_t bias;
+        bias = lane_w / TRACK_TURN_BIAS_RATIO;
+        if (bias < 5) bias = 5;
+        if (bias > 20) bias = 20;
+        if (turn_type == RIGHT_ANGLE_r)
+            target -= bias;
+        else if (turn_type == RIGHT_ANGLE_l)
+            target += bias;
+    }
 
     return clamp_center_to_target(target);
 }

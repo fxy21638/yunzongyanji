@@ -53,12 +53,12 @@ static const track_fsm_cfg_t s_default_cfg[TRACK_FSM_CFG_COUNT] =
 	/*                      Kp     Ki    Kd    imax  aKp   aKi   aKd   aImax aW    EMA    plan             spd  db */
 	/* NONE 无效 */         {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.00f,0.80f, PLAN_HOLD,       0.0f, 1},
 	/* START 发车 */        {0.20f,0.00f,0.18f,0.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.80f, PLAN_STRAIGHT,   0.50f,1},
-	/* STRAIGHT 直道 */     {0.30f,0.02f,0.16f,2.0f, 0.25f,0.02f,0.40f,2.0f, 0.15f,0.55f, PLAN_STRAIGHT,   1.0f, 1},
-	/* RIGHT_ANGLE_l 左弯 */{0.32f,0.02f,0.20f,2.0f, 0.40f,0.06f,0.50f,6.0f, 0.30f,0.65f,  PLAN_TURN_LEFT,  0.55f,3},
-	/* RIGHT_ANGLE_r 右弯 */{0.32f,0.02f,0.20f,2.0f, 0.40f,0.06f,0.50f,6.0f, 0.30f,0.65f, PLAN_TURN_RIGHT, 0.55f,3},
-	/* RING_l 左环岛 */     {0.42f,0.04f,0.30f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_TURN_LEFT,  0.65f,1},
-	/* RING_r 右环岛 */     {0.42f,0.04f,0.30f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_TURN_RIGHT, 0.65f,1},
-	/* RING_c 环岛中心 */   {0.42f,0.04f,0.30f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.25f,0.80f, PLAN_STRAIGHT,   0.65f,1},
+	/* STRAIGHT 直道 */     {0.25f,0.06f,0.22f,6.0f, 0.25f,0.02f,0.40f,2.0f, 0.20f,0.80f, PLAN_STRAIGHT,   1.0f, 1},
+	/* RIGHT_ANGLE_l 左弯 */{0.20f,0.02f,0.32f,5.0f, 0.40f,0.06f,0.50f,6.0f, 0.55f,0.75f,  PLAN_TURN_LEFT,  0.70f,1},
+	/* RIGHT_ANGLE_r 右弯 */{0.20f,0.02f,0.32f,5.0f, 0.40f,0.06f,0.50f,6.0f, 0.55f,0.75f, PLAN_TURN_RIGHT, 0.70f,1},
+	/* RING_l 左环岛 */     {0.25f,0.04f,0.32f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.55f,0.80f, PLAN_TURN_LEFT,  0.65f,1},
+	/* RING_r 右环岛 */     {0.25f,0.04f,0.32f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.55f,0.80f, PLAN_TURN_RIGHT, 0.65f,1},
+	/* RING_c 环岛中心 */   {0.25f,0.04f,0.32f,4.0f, 0.35f,0.03f,0.50f,3.0f, 0.55f,0.80f, PLAN_STRAIGHT,   0.65f,1},
 	/* CROSS 十字路口 */    {0.35f,0.04f,0.25f,2.0f, 0.20f,0.00f,0.40f,0.0f, 0.10f,0.85f, PLAN_CROSS,      0.75f,2},
 	/* BROKEN 断桥通过中 */ {0.25f,0.02f,0.15f,2.0f, 0.20f,0.00f,0.35f,0.0f, 0.05f,0.90f, PLAN_HOLD,       0.45f,3},
 	/* BROKEN_RODE 断桥后 */{1.00f,0.00f,2.00f,0.0f, 0.00f,0.00f,0.00f,0.0f, 0.00f,0.60f, PLAN_BROKEN,     0.50f,2}
