@@ -385,12 +385,21 @@ void steering_control(void)
         pid_pos.integral_max = fsm_imax;
         pos_out = PositionalPID_Calculate(&pid_pos, track_error);
 
-        /* 角度 PID: 赛道右偏(dx>0) → 右转(-dx<0) */
-        pid_gyro.Kp = fsm_angle_kp;
-        pid_gyro.Ki = fsm_angle_ki;
-        pid_gyro.Kd = fsm_angle_kd;
-        pid_gyro.integral_max = fsm_angle_imax;
-        ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
+        /* 角度 PID: 十字路口禁用, track_dx 在十字中不可信 */
+        if (track_element == CROSS)
+        {
+            fsm_angle_w = 0.0f;
+            ang_out = 0.0f;
+        }
+        else
+        {
+            /* 角度 PID: 赛道右偏(dx>0) → 右转(-dx<0) */
+            pid_gyro.Kp = fsm_angle_kp;
+            pid_gyro.Ki = fsm_angle_ki;
+            pid_gyro.Kd = fsm_angle_kd;
+            pid_gyro.integral_max = fsm_angle_imax;
+            ang_out = PositionalPID_Calculate(&pid_gyro, -track_dx);
+        }
 
         steer_output = pos_out * (1.0f - fsm_angle_w)
                      + ang_out * fsm_angle_w;

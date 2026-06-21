@@ -826,10 +826,14 @@ static TRACK_ELEMENT detect_element_segment(void)
     uint8_t near_left_ok, near_right_ok;
     uint8_t far_left_ok, far_right_ok;
     int16_t c_near, c_far, dx;
+    int8_t break_row;  /* 整图宽度法十字检测 */
     TRACK_ELEMENT result;
 
     row_classify_refine(); /* 基础分类已内联, 单遍扫描完成 */
     segment_merge();
+
+    /* 整图扫宽度突变: 扩宽在 LOST 区也能识别, 比 BOTH 段端点对比更稳 */
+    break_row = detect_cross_break_row();
 
     n = g_seg_num;
 
@@ -848,9 +852,9 @@ static TRACK_ELEMENT detect_element_segment(void)
         else if (s1 == ROW_LEFT_JUMP || s1 == ROW_RIGHT_JUMP)
             result = STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
         else if (s1 == ROW_LEFT_LOST)
-            result = RIGHT_ANGLE_l;
+            result = (break_row >= 0) ? CROSS : RIGHT_ANGLE_l;
         else if (s1 == ROW_RIGHT_LOST)
-            result = RIGHT_ANGLE_r;
+            result = (break_row >= 0) ? CROSS : RIGHT_ANGLE_r;
         else if (s1 == ROW_DIVERGE)
             result = STRAIGHT;
         /* s1 不显著 → 落到双行比较确认 */
@@ -858,9 +862,9 @@ static TRACK_ELEMENT detect_element_segment(void)
     else if (s0 == ROW_WIDE)
         result = CROSS;
     else if (s0 == ROW_LEFT_LOST)
-        result = RIGHT_ANGLE_l;
+        result = (break_row >= 0) ? CROSS : RIGHT_ANGLE_l;
     else if (s0 == ROW_RIGHT_LOST)
-        result = RIGHT_ANGLE_r;
+        result = (break_row >= 0) ? CROSS : RIGHT_ANGLE_r;
     else if (s0 == ROW_DIVERGE)
         result = STRAIGHT;
     else if (s0 == ROW_LEFT_JUMP || s0 == ROW_RIGHT_JUMP)
@@ -2031,7 +2035,8 @@ void track_handle(void)
     if (!g_target_detected && !g_obstacle_detected &&
         track_element != NONE &&
         track_element != RIGHT_ANGLE_l && track_element != RIGHT_ANGLE_r &&
-        track_element != RING_l && track_element != RING_r)
+        track_element != RING_l && track_element != RING_r &&
+        track_element != CROSS)
     {
         jump = (int16_t)new_target - (int16_t)track_midpoint_target_P;
         /* Fix 3c: 跳变限制 ±12 → ±6, 抑制 10Hz 振荡 */
