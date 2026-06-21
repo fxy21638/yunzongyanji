@@ -47,7 +47,7 @@ ring_fsm_t g_ring_fsm;
 
 /* 段分叉检测 */
 #define RING_FORK_BOTH_MIN   10  /* BOTH 段最少行数 */
-#define RING_FORK_Y_MIN      55  /* 分叉点最小行号 (太远忽略) */
+#define RING_FORK_Y_MIN      75  /* 分叉点最小行号: 75=图像下半部, 比原55晚触发, 防提前偏置 */
 #define RING_ROAD_CENTER_TOL 30  /* 上方道路中线偏离容差 */
 
 /* 条件3: 边界平滑度 — 参考浙大 cur_circle, 三行边界变化率一致性

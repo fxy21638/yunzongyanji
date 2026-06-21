@@ -9,7 +9,7 @@
 #include "track_fsm.h"
 #include "laser.h"
 
-float speed_base = 110;
+float speed_base = 80;
 
 // 速度模式: 1=开环固定PWM, 0=编码器闭环增量PID
 #define FIXED_SPEED_DEBUG 0
