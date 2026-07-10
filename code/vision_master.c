@@ -793,12 +793,12 @@ static void draw_current_center_overlay(uint8_t *out, const vision_track_result_
 	int16_t cx;
 	int16_t cy;
 
-	if (track->center_x < 0 || track->center_x >= (int16_t)MT9V034_WIDTH)
+	if (track_midpoint_target < 0 || track_midpoint_target >= (int16_t)MT9V034_WIDTH)
 	{
 		return;
 	}
 
-	cx = track->center_x;
+	cx = track_midpoint_target;
 	cy = (int16_t)VISION_LOOKAHEAD_Y;
 	if (cy < 0)
 	{

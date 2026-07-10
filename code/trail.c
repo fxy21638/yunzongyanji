@@ -1,4 +1,4 @@
-﻿// ====================================================================
+// ====================================================================
 // 赛道元素分类 + 目标点规划 — 循迹管线第 2 层
 // ====================================================================
 //
@@ -43,6 +43,7 @@ extern uint8_t xdata mt9v034_image[MT9V034_HEIGHT][MT9V034_WIDTH];
 
 /* 调试开关 */
 #define TRAIL_DBG_PRINTF 1
+#define VISION_USE_PURE_PURSUIT 0  /* 未使用 */
 
 /* 弯道/十字检测参数 */
 #define TRACK_MIN_VALID_TURN_ROWS 8
@@ -849,148 +850,180 @@ uint8_t has_boundary_corner(int16_t *border)
 }
 
 
+/* 参考49.9: 边界收敛度 + 无效行计数 + 十字识别 */
+#define INVALID_ROW_MIN   15   /* 单侧无效行超过此值→可能弯道/十字 */
+#define CROSS_L_INVALID    70  /* 左十字: 左无效>70 (大半图) */
+#define CROSS_R_VALID      3   /* 左十字: 右无效≤3 (几乎无) */
+#define CROSS_R_INVALID    70  /* 右十字 */
+#define CROSS_L_VALID      3
+
+
+/* ================================================================
+ * 49.9拐点检测 + 十字识别
+ * ================================================================ */
+
+static int16_t g_l_down = 0, g_r_down = 0;
+static int16_t g_l_up = 0, g_r_up = 0;
+static int16_t g_l_down_prev = 0, g_r_down_prev = 0, g_l_up_prev = 0, g_r_up_prev = 0;
+static uint8_t g_cross_phase = 0;
+
+/* 构建49.9式 effect_flag */
+static void build_ef(int8_t *lf, int8_t *rf)
+{
+    int16_t y;
+    for (y = 0; y < (int16_t)MT9V034_HEIGHT; y++) {
+        lf[y] = (g_track.left[y] > 2) ? 1 : 0;
+        rf[y] = (g_track.right[y] < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
+    }
+}
+
+/* 49.9 find_down_points */
+#define DN_JUMP  6
+#define DN_STABLE 7
+#define TEAR_TH  25
+
+static void fdn(int8_t *lf, int8_t *rf)
+{
+    int16_t i;
+    g_l_down = 0; g_r_down = 0;
+    for (i = (int16_t)(MT9V034_HEIGHT - 4); i >= 20; i--) {
+        if (!g_l_down && lf[i] && !lf[i-5] && !lf[i-6] && lf[i+1] && lf[i+2] &&
+            abs((int16_t)(g_track.left[i] - g_track.left[i-5])) >= DN_JUMP &&
+            abs((int16_t)(g_track.left[i] - g_track.left[i-6])) >= DN_JUMP &&
+            abs((int16_t)(g_track.left[i] - g_track.left[i+1])) <= DN_STABLE &&
+            abs((int16_t)(g_track.left[i] - g_track.left[i+2])) <= DN_STABLE)
+            g_l_down = i;
+        if (!g_r_down && rf[i] && !rf[i-5] && !rf[i-6] && rf[i+1] && rf[i+2] &&
+            abs((int16_t)(g_track.right[i] - g_track.right[i-5])) >= DN_JUMP &&
+            abs((int16_t)(g_track.right[i] - g_track.right[i-6])) >= DN_JUMP &&
+            abs((int16_t)(g_track.right[i] - g_track.right[i+1])) <= DN_STABLE &&
+            abs((int16_t)(g_track.right[i] - g_track.right[i+2])) <= DN_STABLE)
+            g_r_down = i;
+        if (g_l_down && g_r_down) break;
+    }
+    if (g_l_down && g_r_down && abs((int16_t)(g_l_down - g_r_down)) >= TEAR_TH)
+        g_l_down = g_r_down = 0;
+}
+
+/* 49.9 find_up_points */
+#define CS_TH  7
+#define UP_TH2 6
+
+static void fup(int8_t *lf, int8_t *rf)
+{
+    int16_t i, ls, rs;
+    g_l_up = 0; g_r_up = 0;
+    ls = g_l_down ? (g_l_down - 1) : (int16_t)(MT9V034_HEIGHT / 2);
+    rs = g_r_down ? (g_r_down - 1) : (int16_t)(MT9V034_HEIGHT / 2);
+    if (ls >= MT9V034_HEIGHT - 5) ls = MT9V034_HEIGHT - 6;
+    if (rs >= MT9V034_HEIGHT - 5) rs = MT9V034_HEIGHT - 6;
+    for (i = ls; i >= 25; i--)
+        if (lf[i] && lf[i-1] && lf[i-2] && !lf[i+4] && !rf[i+5] &&
+            abs((int16_t)(g_track.left[i] - g_track.left[i-1])) <= CS_TH &&
+            abs((int16_t)(g_track.left[i-1] - g_track.left[i-2])) <= CS_TH &&
+            abs((int16_t)(g_track.left[i-2] - g_track.left[i-3])) <= CS_TH &&
+            (int16_t)(g_track.left[i] - g_track.left[i+3]) >= UP_TH2 &&
+            (int16_t)(g_track.left[i] - g_track.left[i+4]) >= UP_TH2)
+            { g_l_up = i; break; }
+    for (i = rs; i >= 25; i--)
+        if (rf[i] && rf[i-1] && rf[i-2] && !lf[i+4] && !rf[i+5] &&
+            abs((int16_t)(g_track.right[i] - g_track.right[i-1])) <= CS_TH &&
+            abs((int16_t)(g_track.right[i-1] - g_track.right[i-2])) <= CS_TH &&
+            abs((int16_t)(g_track.right[i-2] - g_track.right[i-3])) <= CS_TH &&
+            (int16_t)(g_track.right[i+3] - g_track.right[i]) >= UP_TH2 &&
+            (int16_t)(g_track.right[i+4] - g_track.right[i]) >= UP_TH2)
+            { g_r_up = i; break; }
+}
+
+/* 49.9 cross_detect + 弯直判别 合并 */
+#define CROSS_INVALID_MIN 30
+#define CROSS_ENTERING_TH 50
+#define CROSS_IN_BEND_TH  25
+#define CROSS_EXITING_TH  55
+#define INVALID_ROW_MIN   15
+
 static TRACK_ELEMENT detect_element_segment(void)
 {
-    int8_t s0, s1;
-    uint8_t n;
-    int16_t l_near, r_near, l_far, r_far;
-    uint16_t near_y, far_y;
-    uint8_t near_left_ok, near_right_ok;
-    uint8_t far_left_ok, far_right_ok;
-    int16_t c_near, c_far, dx;
-    TRACK_ELEMENT result;
+    static int8_t lf[MT9V034_HEIGHT], rf[MT9V034_HEIGHT];
+    int16_t y, l_invalid=0, r_invalid=0;
+    uint8_t corner_cnt, cross_frame=0;
 
-    row_classify_refine(); /* 基础分类已内联, 单遍扫描完成 */
-    segment_merge();
+    build_ef(lf, rf);
 
-    n = g_seg_num;
-
-    if (n == 0)
-        return NONE; /* 原 BROKEN → 本次比赛无断桥, 改 NONE */
-
-    s0 = g_seg_type[0];
-    s1 = (n >= 2) ? g_seg_type[1] : ROW_INVALID;
-    result = STRAIGHT; /* 默认直道 */
-
-    /* 段0=双边正常 → 看段1 */
-    if (s0 == ROW_BOTH)
-    {
-        if (s1 == ROW_WIDE)
-            result = CROSS;
-        else if (s1 == ROW_LEFT_JUMP || s1 == ROW_RIGHT_JUMP)
-            result = STRAIGHT; /* 突变 → 由 ring_fsm_process 确认 */
-        else if (s1 == ROW_LEFT_LOST)
-            result = RIGHT_ANGLE_l;
-        else if (s1 == ROW_RIGHT_LOST)
-            result = RIGHT_ANGLE_r;
-        else if (s1 == ROW_DIVERGE)
-            result = STRAIGHT;
-        /* s1 不显著 → 落到双行比较确认 */
+    /* 统计无效行 */
+    for (y = (int16_t)(MT9V034_HEIGHT - 1); y > 20; y--) {
+        if (!lf[y]) l_invalid++;
+        if (!rf[y]) r_invalid++;
     }
-    else if (s0 == ROW_WIDE)
-        result = CROSS;
-    else if (s0 == ROW_LEFT_LOST)
-        result = RIGHT_ANGLE_l;
-    else if (s0 == ROW_RIGHT_LOST)
-        result = RIGHT_ANGLE_r;
-    else if (s0 == ROW_DIVERGE)
-        result = STRAIGHT;
-    else if (s0 == ROW_LEFT_JUMP || s0 == ROW_RIGHT_JUMP)
-        result = STRAIGHT;
 
-    /* ---- 双行比较 ---- */
-    if (result == STRAIGHT)
-    {
-        near_y = (uint16_t)(MT9V034_HEIGHT - 20);
-        far_y = (uint16_t)(MT9V034_HEIGHT / 2);
-
-        l_near = g_track.left[near_y];
-        r_near = g_track.right[near_y];
-        l_far = g_track.left[far_y];
-        r_far = g_track.right[far_y];
-
-        if (l_near < 0 || r_near < 0 || l_far < 0 || r_far < 0)
-            result = STRAIGHT;
-        else
-        {
-            near_left_ok = (l_near > 2) ? 1 : 0;
-            near_right_ok = (r_near < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
-            far_left_ok = (l_far > 2) ? 1 : 0;
-            far_right_ok = (r_far < (int16_t)(MT9V034_WIDTH - 4)) ? 1 : 0;
-
-            if (!near_left_ok && !near_right_ok)
-                result = STRAIGHT;
-            else if (near_left_ok && near_right_ok && far_left_ok && far_right_ok)
-            {
-                if ((l_near - l_far) > 8 && (r_far - r_near) > 8)
-                    result = CROSS;
-                else
-                {
-                    c_near = (l_near + r_near) / 2;
-                    c_far = (l_far + r_far) / 2;
-                    dx = c_far - c_near;
-                    if (dx > 5) result = RIGHT_ANGLE_r;
-                    else if (dx < -5) result = RIGHT_ANGLE_l;
-                }
-            }
-            else if (near_left_ok && near_right_ok)
-            {
-                /* 近行双边可见, 远行单边丢: 用可见边的偏移方向判弯
-                   原假设: 右丢→右转, 左丢→左转 — 但左转弯道左侧移左也会丢右!
-                   改用可见边方向: L右移(dx>0)→右转, L左移(dx<0)→左转 */
-                if (far_left_ok && !far_right_ok)
-                {
-                    dx = l_far - l_near;
-                    if (dx > 5) result = RIGHT_ANGLE_r;
-                    else if (dx < -5) result = RIGHT_ANGLE_l;
-                }
-                else if (!far_left_ok && far_right_ok)
-                {
-                    dx = r_far - r_near;
-                    if (dx > 5) result = RIGHT_ANGLE_r;
-                    else if (dx < -5) result = RIGHT_ANGLE_l;
-                }
-            }
-            else if (near_left_ok && far_left_ok)
-            {
-                dx = l_far - l_near;
-                if (dx > 5) result = RIGHT_ANGLE_r;
-                else if (dx < -5) result = RIGHT_ANGLE_l;
-            }
-            else if (near_right_ok && far_right_ok)
-            {
-                dx = r_far - r_near;
-                if (dx > 5) result = RIGHT_ANGLE_r;
-                else if (dx < -5) result = RIGHT_ANGLE_l;
-            }
+    /* === 49.9十字状态机 === */
+    if (g_cross_phase) {
+        fdn(lf, rf); fup(lf, rf);
+        corner_cnt = (g_l_up>0)+(g_r_up>0)+(g_l_down>0)+(g_r_down>0);
+        if (l_invalid >= CROSS_INVALID_MIN && r_invalid >= CROSS_INVALID_MIN && corner_cnt >= 3)
+            cross_frame = 1;
+    } else {
+        if (l_invalid >= CROSS_INVALID_MIN && r_invalid >= CROSS_INVALID_MIN) {
+            fdn(lf, rf); fup(lf, rf);
+            corner_cnt = (g_l_up>0)+(g_r_up>0)+(g_l_down>0)+(g_r_down>0);
+            if (corner_cnt >= 3) cross_frame = 1;
         }
-
-    /* ---- 角点门控: 参考 Front_Car ----
-       段分叉可能因 dx 异常误判, 用角点检测二次确认.
-       一侧有真角点 + 对侧无 → 弯曲方向 */
-    if (result == RIGHT_ANGLE_l || result == RIGHT_ANGLE_r)
-    {
-        uint8_t l_corner, r_corner;
-        l_corner = has_boundary_corner(g_track.left);
-        r_corner = has_boundary_corner(g_track.right);
-
-        /* 角点确认: 一侧有角点 + 对侧没有 → 真转弯, 否则降级直道 */
-        if (result == RIGHT_ANGLE_l)
-        {
-            /* 左转需要左边界有角点 (弯道鼓出侧) */
-            if (!l_corner) result = STRAIGHT;
-        }
-        else /* RIGHT_ANGLE_r */
-        {
-            /* 右转需要右边界有角点 */
-            if (!r_corner) result = STRAIGHT;
-        }
+        if (!cross_frame) { g_l_up=g_l_down=g_r_up=g_r_down=0; }
     }
-    }
-    /* åè49.9: æ¶æåº¦éªè¯ — ç´éè¯¯å¤å¼¯éæ¶æå */
 
-    return result;
+    switch (g_cross_phase) {
+    case 0: if (cross_frame) g_cross_phase=1; break;
+    case 1: if (l_invalid>=CROSS_ENTERING_TH&&r_invalid>=CROSS_ENTERING_TH) g_cross_phase=2; break;
+    case 2: if (l_invalid<CROSS_IN_BEND_TH&&r_invalid<CROSS_IN_BEND_TH) g_cross_phase=3; break;
+    case 3: if (l_invalid>=CROSS_EXITING_TH&&r_invalid>=CROSS_EXITING_TH) g_cross_phase=4;
+            else if (l_invalid<CROSS_INVALID_MIN||r_invalid<CROSS_INVALID_MIN) g_cross_phase=0; break;
+    case 4: if (l_invalid<CROSS_IN_BEND_TH&&r_invalid<CROSS_IN_BEND_TH) g_cross_phase=0;
+            else if (l_invalid<CROSS_INVALID_MIN&&r_invalid<CROSS_INVALID_MIN) g_cross_phase=0; break;
+    default: g_cross_phase=0; break;
+    }
+
+    /* 拐点防抖 */
+    if (g_cross_phase) {
+        if (!g_l_up && g_l_up_prev) g_l_up=g_l_up_prev;
+        if (!g_r_up && g_r_up_prev) g_r_up=g_r_up_prev;
+        if (!g_l_down && g_l_down_prev) g_l_down=g_l_down_prev;
+        if (!g_r_down && g_r_down_prev) g_r_down=g_r_down_prev;
+    }
+    g_l_up_prev=g_l_up; g_r_up_prev=g_r_up; g_l_down_prev=g_l_down; g_r_down_prev=g_r_down;
+
+    /* 超时保护: 无拐点时强制清零, 防止卡在十字状态 */
+    {
+        static uint8_t cross_timeout = 0;
+        if (!cross_frame) cross_timeout++;
+        else cross_timeout = 0;
+        if (cross_timeout > 10) { g_cross_phase = 0; cross_timeout = 0; }
+    }
+
+    if (g_cross_phase >= 2) return CROSS;  /* ENTERING/IN_BEND/EXITING */
+
+    /* === 直弯判别 === */
+    /* 修复: 只有双边都有效时才信收敛度, 靠边时必须转向修正 */
+    if (l_invalid < 20 && r_invalid < 20 && is_straight_by_converge())
+        return STRAIGHT;
+
+    /* === 弯道方向 === */
+    {
+        int16_t l_near, r_near, l_far, r_far, dx;
+        l_near=g_track.left[100]; r_near=g_track.right[100];
+        l_far=g_track.left[60];  r_far=g_track.right[60];
+        if (l_near>2 && r_near<(int16_t)(MT9V034_WIDTH-4) &&
+            l_far>2 && r_far<(int16_t)(MT9V034_WIDTH-4)) {
+            dx=(l_far+r_far)/2-(l_near+r_near)/2;
+            if (dx>8)       return RIGHT_ANGLE_r;
+            else if (dx<-8) return RIGHT_ANGLE_l;
+        }
+        if (l_invalid>=INVALID_ROW_MIN && r_invalid<INVALID_ROW_MIN) return RIGHT_ANGLE_r;
+        if (r_invalid>=INVALID_ROW_MIN && l_invalid<INVALID_ROW_MIN) return RIGHT_ANGLE_l;
+    }
+    return STRAIGHT;
 }
+
+
 
 /* ================================================================
  * 第 8.5 节 — 靶子检测 (独立于赛道元素分类)
@@ -1714,65 +1747,102 @@ TRACK_ELEMENT track_element_judge(void)
 /* 参考49.9 GetDet: 按元素类型选前瞻行, 在窗口内加权平均
    前瞻行权重1.0, 周围行按距离递减(0.96...0.47)
    环岛/十字用更近的前瞻(避免看太远看错) */
-#define LOOK_WINDOW   5   /* 前瞻行上下各5行 */
-#define LOOK_NORMAL   80  /* 60→80: 看近处, 不提前不急退 */
-#define LOOK_CROSS    70
-#define LOOK_RING     70
+
+/* 参考49.9 GetDet: 浮点权重 + 动态前瞻 */
+#define LOOK_NORMAL   50   /* 80→50: 看更远, 角度环预判 */
+#define LOOK_CROSS    50
+#define LOOK_RING     50
+#define LOOK_WINDOW   5
 
 static uint8_t plan_weighted_center(TRACK_ELEMENT elem)
 {
-    int16_t i, look_y;
-    int16_t center_sum, weight_sum;
+    int16_t i, look_y, off_line, center;
     int16_t l, r;
-    int16_t min_y;
-    int16_t weights[11];  /* 窗口 ±5 = 11行 */
+    float det_temp, unit_all;
+    /* 49.9 Weighting[]: [0.96, 0.92, 0.88, 0.83, 0.77, 0.71, 0.65, 0.59, 0.53, 0.47] */
+    static const float weighting[10] = {
+        0.96f, 0.92f, 0.88f, 0.83f, 0.77f,
+        0.71f, 0.65f, 0.59f, 0.53f, 0.47f
+    };
 
     /* 选前瞻行 */
-    if (elem == CROSS)
-        look_y = LOOK_CROSS;
-    else if (elem == RING_l || elem == RING_r || elem == RING_c)
-        look_y = LOOK_RING;
-    else
-        look_y = LOOK_NORMAL;
+    if (elem == CROSS)                         look_y = LOOK_CROSS;
+    else if (elem == RING_l || elem == RING_r || elem == RING_c) look_y = LOOK_RING;
+    else                                       look_y = LOOK_NORMAL;
 
-    if (look_y < LOOK_WINDOW + 2) look_y = LOOK_WINDOW + 2;
-    if (look_y >= (int16_t)(MT9V034_HEIGHT - LOOK_WINDOW - 2))
-        look_y = (int16_t)(MT9V034_HEIGHT - LOOK_WINDOW - 2);
-
-    /* 预计算权重: 前瞻行中心, 两边递减 */
-    for (i = 0; i <= LOOK_WINDOW * 2; i++)
-    {
-        int16_t dist;
-        dist = i - LOOK_WINDOW;
-        if (dist < 0) dist = -dist;
-        weights[i] = (int16_t)(LOOK_WINDOW + 1 - dist);
+    /* 找有效数据上界 (第一个双边可见行) */
+    off_line = 2;
+    for (i = 2; i < (int16_t)(MT9V034_HEIGHT); i++) {
+        l = g_track.left[i]; r = g_track.right[i];
+        if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4)) { off_line = i; break; }
     }
 
-    center_sum = 0;
-    weight_sum = 0;
-    min_y = look_y - LOOK_WINDOW;
-    for (i = 0; i <= LOOK_WINDOW * 2; i++)
-    {
-        int16_t y = min_y + i;
-        l = g_track.left[(uint16_t)y];
-        r = g_track.right[(uint16_t)y];
-        if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4))
-        {
-            center_sum += ((l + r) / 2) * weights[i];
-            weight_sum += weights[i];
+    if (look_y < off_line + 1) look_y = off_line + 1;
+    if (look_y >= (int16_t)(MT9V034_HEIGHT - LOOK_WINDOW - 1))
+        look_y = (int16_t)(MT9V034_HEIGHT - LOOK_WINDOW - 2);
+
+    det_temp = 0.0f;  unit_all = 0.0f;
+
+    /* 49.9窗口: 前瞻行±5, 中心权重1.0, 两边用weighting */
+    if ((look_y - LOOK_WINDOW) >= off_line) {
+        for (i = look_y - LOOK_WINDOW; i < look_y; i++) {
+            l = g_track.left[i]; r = g_track.right[i];
+            if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4)) {
+                center = (l + r) / 2;
+                det_temp += weighting[look_y - i - 1] * (float)center;
+                unit_all += weighting[look_y - i - 1];
+            }
+        }
+        for (i = look_y + LOOK_WINDOW; i > look_y; i--) {
+            l = g_track.left[i]; r = g_track.right[i];
+            if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4)) {
+                center = (l + r) / 2;
+                det_temp += weighting[i - look_y - 1] * (float)center;
+                unit_all += weighting[i - look_y - 1];
+            }
+        }
+        l = g_track.left[look_y]; r = g_track.right[look_y];
+        if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4)) {
+            center = (l + r) / 2;
+            det_temp = ((float)center + det_temp) / (unit_all + 1.0f);
+        } else {
+            if (unit_all > 0.0f) det_temp /= unit_all;
+            else return CENTER_POINT;
+        }
+    } else {
+        /* 数据不足: 取最上面几行 */
+        int16_t mirror_end;
+        for (i = off_line; i < look_y; i++) {
+            l = g_track.left[i]; r = g_track.right[i];
+            if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4)) {
+                center = (l + r) / 2;
+                det_temp += weighting[look_y - i - 1] * (float)center;
+                unit_all += weighting[look_y - i - 1];
+            }
+        }
+        mirror_end = look_y + (look_y - off_line);
+        if (mirror_end >= (int16_t)MT9V034_HEIGHT) mirror_end = (int16_t)(MT9V034_HEIGHT - 1);
+        for (i = mirror_end; i > look_y; i--) {
+            l = g_track.left[i]; r = g_track.right[i];
+            if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4)) {
+                center = (l + r) / 2;
+                det_temp += weighting[i - look_y - 1] * (float)center;
+                unit_all += weighting[i - look_y - 1];
+            }
+        }
+        l = g_track.left[look_y]; r = g_track.right[look_y];
+        if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4)) {
+            center = (l + r) / 2;
+            det_temp = ((float)center + det_temp) / (unit_all + 1.0f);
+        } else {
+            if (unit_all > 0.0f) det_temp /= unit_all;
+            else return CENTER_POINT;
         }
     }
 
-    if (weight_sum > 0)
-        return clamp_center_to_target((int16_t)(center_sum / weight_sum));
-
-    /* fallback */
-    l = g_track.left[(uint16_t)look_y];
-    r = g_track.right[(uint16_t)look_y];
-    if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4))
-        return clamp_center_to_target((l + r) / 2);
-
-    return CENTER_POINT;
+    if (det_temp < 0.0f) det_temp = 0.0f;
+    if (det_temp > 187.0f) det_temp = 187.0f;
+    return (uint8_t)det_temp;
 }
 
 static uint8_t plan_straight_center(void)
