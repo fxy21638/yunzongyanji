@@ -2,12 +2,12 @@
 #include "key.h"
 #include "main.h"
 
-#define SERVO_MAX_ANGLE            105
+#define SERVO_MAX_ANGLE            105   /* 物理限位70~110 */
 #define SERVO_MIN_ANGLE            75
 #define CAR_MAX_ANGLE				130
 #define CAR_MIN_ANGLE				50
 #define SERVO_CENTER_ANGLE         90.0f
-#define WHEEL_TO_SERVO_SCALE       2.00f
+#define WHEEL_TO_SERVO_SCALE       0.50f  /* 机械2:1补偿: 舵机1°=机械2° */
 
 float servo_trim_offset = 0.0f;  /* 舵机中位补偿: 车偏左→正值, 偏右→负值 */
 uint8_t servo_angle = 90;

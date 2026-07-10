@@ -29,7 +29,7 @@ void System_Init(void)
     motor_Init();
     encoder_Init();
     servo_Init();
-    laser_Init();   // P9.0 激光常亮
+    laser_Init(); // laser.c 未加入工程 
     control_Init();
 }
 

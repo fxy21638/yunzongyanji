@@ -17,7 +17,7 @@
 #include "track_fsm.h"
 #include "ring_fsm.h"
 #include "speed_tune.h"
-#include "laser.h"
+// #include "laser.h"
 
 #define LED GPIO_PB6
 

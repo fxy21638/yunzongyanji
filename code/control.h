@@ -6,17 +6,12 @@
 #include "trail.h"
 #include "pid.h"
 
-#define change_kib 4
-#define MOTOR_SPEED_LIMIT 800
-#define MOTOR_POSITION_LIMIT 1000
-#define MOTOR_ANGLE_LIMIT 1000
 #define STEER_OUTPUT_LIMIT 20.0f
+#define SPEED_DIFF_GAIN    0.50f   /* diff steering gain: pixel_err x gain = speed bias */
 
 #define SATURATE(x, min, max) ((x) < (min) ? (min) : ((x) > (max) ? (max) : (x)))
 
 extern float speed_base;
-extern float gyro_target;
-extern uint8_t turn_step;
 extern int32_t cnt_degree;
 extern float ring_start_yaw;
 

@@ -484,6 +484,16 @@
               <FileType>5</FileType>
               <FilePath>.\code\speed_tune.h</FilePath>
             </File>
+            <File>
+              <FileName>laser.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\laser.c</FilePath>
+            </File>
+            <File>
+              <FileName>laser.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\laser.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

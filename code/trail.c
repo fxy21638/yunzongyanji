@@ -789,6 +789,38 @@ static void segment_merge(void)
     }
 }
 
+/* ---------- 参考49.9 straight_bend_detect: 边界收敛度判定弯直 ---------- */
+#define STRAIGHT_CONVERGE_TH 30  /* 左右同时收敛的行数阈值 */
+
+static uint8_t is_straight_by_converge(void)
+{
+    int16_t y;
+    int16_t inc = 0;  /* 左边界从底向上递增次数 */
+    int16_t dec = 0;  /* 右边界从底向上递减次数 */
+    int16_t l_prev, r_prev;
+
+    l_prev = g_track.left[(uint16_t)(MT9V034_HEIGHT - 2)];
+    r_prev = g_track.right[(uint16_t)(MT9V034_HEIGHT - 2)];
+
+    for (y = (int16_t)(MT9V034_HEIGHT - 3); y > 20; y--)
+    {
+        int16_t l = g_track.left[(uint16_t)y];
+        int16_t r = g_track.right[(uint16_t)y];
+        if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4) &&
+            l_prev > 2 && r_prev < (int16_t)(MT9V034_WIDTH - 4))
+        {
+            if (l > l_prev) inc++;  /* 左边界向右收窄 */
+            if (r < r_prev) dec++;  /* 右边界向左收窄 */
+        }
+        l_prev = l; r_prev = r;
+    }
+    /* 取最小值: 直道左右均匀收窄都大; 弯道一侧小 */
+    {
+        int16_t sudu = (inc < dec) ? inc : dec;
+        return (sudu > STRAIGHT_CONVERGE_TH) ? 1 : 0;
+    }
+}
+
 /* ---------- 基于分段的元素检测 ---------- */
 /* 角点检测: 边界在窗口内的最大水平偏移.
    偏移超过阈值 → 存在真角点; 否则是平滑弯道.
@@ -955,6 +987,7 @@ static TRACK_ELEMENT detect_element_segment(void)
         }
     }
     }
+    /* åè49.9: æ¶æåº¦éªè¯ — ç´éè¯¯å¤å¼¯éæ¶æå */
 
     return result;
 }
@@ -1614,8 +1647,7 @@ static uint8_t compute_combined_aim(void)
     if (aim < 5) aim = 5;
     if (aim > (int16_t)(MT9V034_WIDTH - 5)) aim = (int16_t)(MT9V034_WIDTH - 5);
 
-    (void)left_space;
-    (void)right_space;
+    /* left_space, right_space unused in combined aim */
 
     return (uint8_t)aim;
 }
@@ -1672,11 +1704,77 @@ TRACK_ELEMENT track_element_judge(void)
  * plan_turn_center()     — 弯道: 道路中心估计 + 内侧偏置
  *   - 双边可见 → (L+R)/2
  *   - 单边丢线 → 可见边 ± 半道宽
+ * plan_weighted_center() — 参考49.9: 动态前瞻+加权窗口误差
+ *   按元素类型选前瞻行, 前瞻行及±5窗口取加权平均
  *   - 十字路口 → CENTER_POINT
  * plan_pure_pursuit()    — 纯追踪: 中线点集 → 前瞻转向角
  * ================================================================ */
 
 /* 直道: 近行(98)+远行(60)加权 — Fix 3b: 近行 67% (噪声小) + 远行 33% (前瞻) */
+/* 参考49.9 GetDet: 按元素类型选前瞻行, 在窗口内加权平均
+   前瞻行权重1.0, 周围行按距离递减(0.96...0.47)
+   环岛/十字用更近的前瞻(避免看太远看错) */
+#define LOOK_WINDOW   5   /* 前瞻行上下各5行 */
+#define LOOK_NORMAL   80  /* 60→80: 看近处, 不提前不急退 */
+#define LOOK_CROSS    70
+#define LOOK_RING     70
+
+static uint8_t plan_weighted_center(TRACK_ELEMENT elem)
+{
+    int16_t i, look_y;
+    int16_t center_sum, weight_sum;
+    int16_t l, r;
+    int16_t min_y;
+    int16_t weights[11];  /* 窗口 ±5 = 11行 */
+
+    /* 选前瞻行 */
+    if (elem == CROSS)
+        look_y = LOOK_CROSS;
+    else if (elem == RING_l || elem == RING_r || elem == RING_c)
+        look_y = LOOK_RING;
+    else
+        look_y = LOOK_NORMAL;
+
+    if (look_y < LOOK_WINDOW + 2) look_y = LOOK_WINDOW + 2;
+    if (look_y >= (int16_t)(MT9V034_HEIGHT - LOOK_WINDOW - 2))
+        look_y = (int16_t)(MT9V034_HEIGHT - LOOK_WINDOW - 2);
+
+    /* 预计算权重: 前瞻行中心, 两边递减 */
+    for (i = 0; i <= LOOK_WINDOW * 2; i++)
+    {
+        int16_t dist;
+        dist = i - LOOK_WINDOW;
+        if (dist < 0) dist = -dist;
+        weights[i] = (int16_t)(LOOK_WINDOW + 1 - dist);
+    }
+
+    center_sum = 0;
+    weight_sum = 0;
+    min_y = look_y - LOOK_WINDOW;
+    for (i = 0; i <= LOOK_WINDOW * 2; i++)
+    {
+        int16_t y = min_y + i;
+        l = g_track.left[(uint16_t)y];
+        r = g_track.right[(uint16_t)y];
+        if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4))
+        {
+            center_sum += ((l + r) / 2) * weights[i];
+            weight_sum += weights[i];
+        }
+    }
+
+    if (weight_sum > 0)
+        return clamp_center_to_target((int16_t)(center_sum / weight_sum));
+
+    /* fallback */
+    l = g_track.left[(uint16_t)look_y];
+    r = g_track.right[(uint16_t)look_y];
+    if (l > 2 && r < (int16_t)(MT9V034_WIDTH - 4))
+        return clamp_center_to_target((l + r) / 2);
+
+    return CENTER_POINT;
+}
+
 static uint8_t plan_straight_center(void)
 {
     int16_t near_mid, far_mid, target;
@@ -1867,11 +1965,13 @@ static void trail_fsm_on_entry(TRACK_ELEMENT state)
     pid_pos.integral = 0.0f;
     pid_gyro.integral = 0.0f;
 
-    /* 锁定航向: 直道保持姿态 [BROKEN_RODE 已注释, 本次比赛无断桥] */
+    /* 锁定航向: 49.9方案不使用陀螺仪直道保持, 注释掉 */
+    /*
     if (state == STRAIGHT)
     {
         gyro_target = yaw;
     }
+    */
     if (state == CROSS)
     {
         g_track_fsm.state_hold = 3;
@@ -1914,7 +2014,6 @@ void track_handle(void)
     track_plan_t plan;
     int16_t break_row;
     uint8_t cross_cnt;
-    float speed_est;
     int16_t jump;
     uint8_t new_target;
     float ema_alpha;
@@ -1996,28 +2095,14 @@ void track_handle(void)
     plan = track_fsm_get_plan(&g_track_fsm);
     new_target = track_midpoint_target_P;
 
+    /* 参考49.9: 非环岛用加权前瞻法 (环岛用专用规划) */
     if (track_element == RING_l || track_element == RING_r || track_element == RING_c)
     {
         new_target = ring_fsm_get_target(&g_ring_fsm);
     }
-    else if (plan == PLAN_STRAIGHT)
+    else
     {
-        new_target = plan_straight_center();
-    }
-    else if (plan == PLAN_TURN_LEFT)
-    {
-        new_target = plan_turn_center(RIGHT_ANGLE_l);
-    }
-    else if (plan == PLAN_TURN_RIGHT)
-    {
-        new_target = plan_turn_center(RIGHT_ANGLE_r);
-    }
-    else if (plan == PLAN_CROSS)
-    {
-        if (g_track.center_x >= 0)
-            new_target = clamp_center_to_target(g_track.center_x);
-        else
-            new_target = CENTER_POINT;
+        new_target = plan_weighted_center(track_element);
     }
     /* PLAN_HOLD 和 PLAN_BROKEN: 保持上一帧目标 */
 
@@ -2053,23 +2138,12 @@ void track_handle(void)
     }
 
 #if TRAIL_DBG_PRINTF
-    printf("DBG feature:%d cross_cnt:%u break_row:%d valid_rows:%u center_x:%d element:%s target:%u tg_det:%u tg_cx:%u ob_det:%u ob_cx:%u pp_ang:%.1f\r\n",
-           g_track.feature,
-           cross_cnt,
-           break_row,
-           g_track.valid_rows,
-           g_track.center_x,
+    printf("DBG elem:%s tgt:%u err:%d cx:%d f:%d\r\n",
            track_element_name(track_element),
            track_midpoint_target,
-           g_target_detected,
-           g_target_center_x,
-           g_obstacle_detected,
-           g_obstacle_center_x,
-           pp_steering_angle);
-#endif
-
-#if VOFA_FIREWATER
-    vofa_send_firewater();
+           g_track.error_x,
+           g_track.center_x,
+           g_track.feature);
 #endif
 
     report_track_element_if_changed();
