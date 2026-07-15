@@ -79,19 +79,19 @@ static void servo_pd_set(void)
     //            g_z_d = 4.20f;
     //        }
     //    }
-    //    else if (cross_state != 0 || cross_phase != CROSS_PHASE_NONE)
-    //    {
-    //        if (cross_phase == CROSS_PHASE_ENTERING || cross_phase == CROSS_PHASE_IN_BEND)
-    //        {
-    //            g_z_p = 1.85f;
-    //            g_z_d = 5.20f;
-    //        }
-    //        else
-    //        {
-    //            g_z_p = 1.75f;
-    //            g_z_d = 5.00f;
-    //        }
-    //    }
+    else if (cross_state != 0 || cross_phase != CROSS_PHASE_NONE)
+    {
+        if (cross_phase == CROSS_PHASE_ENTERING || cross_phase == CROSS_PHASE_IN_BEND)
+        {
+            g_z_p = 1.85f;
+            g_z_d = 5.20f;
+        }
+        else
+        {
+            g_z_p = 1.75f;
+            g_z_d = 5.00f;
+        }
+    }
     //    else if (abs_err >= 30)
     //    {
     //        g_z_p = 2.20f;
@@ -104,7 +104,7 @@ static void servo_pd_set(void)
     //    }
     else
     {
-        g_z_p = 0.60f;
+        g_z_p = 0.50f;
         g_z_d = 6.00f;
     }
 }
@@ -120,7 +120,7 @@ static void servo_pd(void)
     float d_error, servo_out;
 
     d_error = (float)(error - error_last);
-    servo_d_filter = 0.8f * servo_d_filter + 0.2f * d_error; /* 49.9 D滤波 */
+    servo_d_filter = 0.50f * servo_d_filter + 0.5f * d_error; /* 49.9 D滤波 */
     servo_out = (float)error * g_z_p + servo_d_filter * g_z_d;
 
     if (servo_out > (float)SERVO_PWM_LIMIT)
@@ -190,10 +190,10 @@ static float pid_increase(float *out, float *e, float *e1, float *e2,
 
 static float motor_target_ramp(float now, float target)
 {
-    if (target > now + 5.0f)
-        return now + 5.0f;
-    if (target < now - 5.0f)
-        return now - 5.0f;
+    if (target > now + 3.0f)
+        return now + 3.0f;
+    if (target < now - 3.0f)
+        return now - 3.0f;
     return target;
 }
 
@@ -229,7 +229,6 @@ static void final_motor_control(int16_t base_speed, float diff_k, int16_t diff_l
     if (diff < -(float)diff_limit)
         diff = -(float)diff_limit;
 
-    diff = 0;
     target_l = (float)base_speed - diff;
     target_r = (float)base_speed + diff;
     if (target_l < 15.0f)
@@ -257,21 +256,21 @@ static void track_motor_control(void)
 //        else
 //            final_motor_control(24, 0.35f, 11);
 //    }
-//    else if (cross_state != 0 || cross_phase != CROSS_PHASE_NONE)
-//    {
-//        if (cross_phase == CROSS_PHASE_ENTERING || cross_phase == CROSS_PHASE_IN_BEND)
-//            final_motor_control(22, 0.45f, 12);
-//        else
-//            final_motor_control(26, 0.40f, 12);
-//    }
+    else if (cross_state != 0 || cross_phase != CROSS_PHASE_NONE)
+    {
+        if (cross_phase == CROSS_PHASE_ENTERING || cross_phase == CROSS_PHASE_IN_BEND)
+            final_motor_control(22, 0.45f, 12);
+        else
+            final_motor_control(26, 0.40f, 12);
+    }
     else if (abs_err >= 30)
         final_motor_control(35, 0, 12);   /* 大偏差 → 急弯速度 */
     else if (abs_err >= 15)
         final_motor_control(38, 0, 14);   /* 中偏差 → 中速 */
     else if (abs_err < 5)
-        final_motor_control((int16_t)speed_base, 0.30f, 10); /* 很直 → 全速 */
+        final_motor_control((int16_t)speed_base, 0.15f, 10); /* 很直 → 全速 */
     else
-        final_motor_control(40, 0.38f, 12); /* 微偏 → 中高速 */
+        final_motor_control(40, 0.20f, 12); /* 微偏 → 中高速 */
 }
 
 /* ================================================================
