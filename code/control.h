@@ -3,7 +3,7 @@
 
 #include "ky_headfile.h"
 
-/* 舵机 PD 参数结构 (49.9) */
+/* 舵机 PD 参数结构*/
 typedef struct
 {
     float z_p;
@@ -14,7 +14,7 @@ extern PID_t Pid;
 extern float server_out;
 extern int16_t error;
 
-/* 电机 PID 结构 (49.9) */
+/* 电机 PID 结构 */
 typedef struct
 {
     float Kp, Ki, Kd, Lowpass;

@@ -17,7 +17,7 @@ typedef enum {
     RING_l, RING_r, RING_c, CROSS, BROKEN, BROKEN_RODE
 } TRACK_ELEMENT;
 
-/* 边界搜索参数 (49.9) */
+/* 边界搜索参数 */
 #define THRESHOLD            15
 #define JUMP_NUM             3
 #define SEARCH_MAX            (IMAGE_W - 2)
@@ -45,7 +45,7 @@ typedef enum {
 #define TOWPOINT_WINDOW      5
 #define STRAIGHT_THRESHOLD   60
 
-/* 十字 (49.9) */
+/* 十字 */
 #define CROSS_NONE           0
 #define CROSS_CONFIRMED      1
 #define CROSS_PHASE_NONE     0
@@ -63,7 +63,7 @@ typedef enum {
 #define UP_JUMP_TH2          6
 #define CROSS_TEAR_TH        25
 
-/* 环岛 (49.9) */
+/* 环岛  */
 #define HUANDAO_NONE         0
 #define HUANDAO_STATE1       1
 #define HUANDAO_STATE2       2
@@ -85,7 +85,7 @@ typedef enum {
 #define HD_R_UP_INC_TH       20
 #define HD_HALF_WIDTH_RIGHT_OFFSET 15
 
-/* 靶子 (49.9) */
+/* 靶子  */
 #define TARGET_ROW_START            119
 #define TARGET_ROW_END              40
 #define TARGET_ROW_STEP             4

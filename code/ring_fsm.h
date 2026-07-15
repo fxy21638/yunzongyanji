@@ -1,4 +1,4 @@
-// 环岛状态机 — 移植49.9 huandao_detect 7状态
+// 环岛状态机 —  huandao_detect 7状态
 //   IDLE → RING_ENTER_r → RING_CENTER → IDLE
 
 #ifndef __RING_FSM_H__
@@ -17,7 +17,7 @@ typedef enum
 typedef struct
 {
     ring_state_t state;
-    float        entry_yaw;
+    float entry_yaw;
 } ring_fsm_t;
 
 extern ring_fsm_t g_ring_fsm;

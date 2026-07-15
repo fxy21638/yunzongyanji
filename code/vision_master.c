@@ -15,8 +15,8 @@
 
 #define DISPLAY_MAX_CHAIN_POINTS MT9V034_HEIGHT
 #define DISPLAY_CENTER_POINTS 128
-#define DISPLAY_CENTER_Y_BOTTOM (MT9V034_HEIGHT - 20)  // 从底部向上数第20行 = y99
-#define DISPLAY_CENTER_Y_TOP    (MT9V034_HEIGHT - 100)  // 从底部向上数第80行 = y39
+#define DISPLAY_CENTER_Y_BOTTOM (MT9V034_HEIGHT - 20) // 从底部向上数第20行 = y99
+#define DISPLAY_CENTER_Y_TOP (MT9V034_HEIGHT - 100)	  // 从底部向上数第80行 = y39
 #define DISPLAY_CENTER_MAX_COUNT (DISPLAY_CENTER_Y_BOTTOM - DISPLAY_CENTER_Y_TOP + 1)
 #define DISPLAY_CROSS_BASE_Y0 (MT9V034_HEIGHT - 18)
 #define DISPLAY_CROSS_BASE_Y1 (MT9V034_HEIGHT - 6)
@@ -231,7 +231,7 @@ static void stabilize_cross_boundaries(const vision_track_result_t *track, int16
 	uint16_t y_fit_end;
 	static uint8_t cross_hold = 0;
 
-	// 直接使用 49.9 cross_phase 判断
+	// 直接使用 cross_phase 判断
 	if (cross_phase != CROSS_PHASE_NONE)
 	{
 		cross_hold = 4;
@@ -536,7 +536,8 @@ static void draw_dashed_hline(uint8_t *out, int16_t y, uint8_t dash_len, uint8_t
 	uint8_t phase = 0;
 	uint8_t cnt = 0;
 
-	if (y < 0 || y >= (int16_t)MT9V034_HEIGHT) return;
+	if (y < 0 || y >= (int16_t)MT9V034_HEIGHT)
+		return;
 
 	for (x = 0; x < (int16_t)MT9V034_WIDTH; x++)
 	{
@@ -556,7 +557,7 @@ static void draw_reference_lines(uint8_t *out)
 {
 	// 中线绘制范围（底部标记）
 	draw_dashed_hline(out, (int16_t)DISPLAY_CENTER_Y_BOTTOM, 2, 10);
-	draw_dashed_hline(out, (int16_t)DISPLAY_CENTER_Y_TOP,    2, 10);
+	draw_dashed_hline(out, (int16_t)DISPLAY_CENTER_Y_TOP, 2, 10);
 
 	// 直道远点 row60（权重67%）
 	draw_dashed_hline(out, (int16_t)(MT9V034_HEIGHT / 2), 4, 4);
@@ -650,26 +651,30 @@ static void draw_boundary_chains(uint8_t *out)
 
 	if (g_left_count >= 2)
 	{
-		last_x = g_left_chain[0].x; last_y = g_left_chain[0].y;
+		last_x = g_left_chain[0].x;
+		last_y = g_left_chain[0].y;
 		for (i = 1; i < g_left_count; i++)
 		{
 			if (abs_i16((int16_t)(g_left_chain[i].y - last_y)) <= DISPLAY_PAIR_Y_GAP_MAX)
 			{
 				draw_segment(out, last_x, last_y, g_left_chain[i].x, g_left_chain[i].y);
 			}
-			last_x = g_left_chain[i].x; last_y = g_left_chain[i].y;
+			last_x = g_left_chain[i].x;
+			last_y = g_left_chain[i].y;
 		}
 	}
 	if (g_right_count >= 2)
 	{
-		last_x = g_right_chain[0].x; last_y = g_right_chain[0].y;
+		last_x = g_right_chain[0].x;
+		last_y = g_right_chain[0].y;
 		for (i = 1; i < g_right_count; i++)
 		{
 			if (abs_i16((int16_t)(g_right_chain[i].y - last_y)) <= DISPLAY_PAIR_Y_GAP_MAX)
 			{
 				draw_segment(out, last_x, last_y, g_right_chain[i].x, g_right_chain[i].y);
 			}
-			last_x = g_right_chain[i].x; last_y = g_right_chain[i].y;
+			last_x = g_right_chain[i].x;
+			last_y = g_right_chain[i].y;
 		}
 	}
 }
@@ -762,15 +767,18 @@ static void draw_per_row_mid_overlay(uint8_t *out, const vision_track_result_t *
 		{
 			// Draw 3-pixel bar
 			overlay_pixel(out, m, (int16_t)y, 0);
-			if (m > 0) overlay_pixel(out, (int16_t)(m - 1), (int16_t)y, 0);
-			if (m < (int16_t)(MT9V034_WIDTH - 1)) overlay_pixel(out, (int16_t)(m + 1), (int16_t)y, 0);
+			if (m > 0)
+				overlay_pixel(out, (int16_t)(m - 1), (int16_t)y, 0);
+			if (m < (int16_t)(MT9V034_WIDTH - 1))
+				overlay_pixel(out, (int16_t)(m + 1), (int16_t)y, 0);
 
 			// Fill gap from previous valid row
 			if (has_prev)
 			{
 				int16_t dm;
 				dm = (int16_t)(m - prev_valid);
-				if (dm < 0) dm = (int16_t)(-dm);
+				if (dm < 0)
+					dm = (int16_t)(-dm);
 				if (dm > 1 && dm < 50)
 				{
 					uint8_t k;
@@ -818,160 +826,164 @@ static void draw_current_center_overlay(uint8_t *out, const vision_track_result_
 // 5×7 点阵字库 (仅数字 0-9 + 空格)
 // 每字符 5 字节, 列优先, bit0=顶部像素
 static const uint8_t s_font_5x7[11][5] =
-{
-    {0x3E, 0x51, 0x49, 0x45, 0x3E}, // 0
-    {0x00, 0x42, 0x7F, 0x40, 0x00}, // 1
-    {0x42, 0x61, 0x51, 0x49, 0x46}, // 2
-    {0x21, 0x41, 0x45, 0x4B, 0x31}, // 3
-    {0x18, 0x14, 0x12, 0x7F, 0x10}, // 4
-    {0x27, 0x45, 0x45, 0x45, 0x39}, // 5
-    {0x3C, 0x4A, 0x49, 0x49, 0x30}, // 6
-    {0x01, 0x71, 0x09, 0x05, 0x03}, // 7
-    {0x36, 0x49, 0x49, 0x49, 0x36}, // 8
-    {0x06, 0x49, 0x49, 0x29, 0x1E}, // 9
-    {0x00, 0x00, 0x00, 0x00, 0x00}, // 空格 (索引10)
+	{
+		{0x3E, 0x51, 0x49, 0x45, 0x3E}, // 0
+		{0x00, 0x42, 0x7F, 0x40, 0x00}, // 1
+		{0x42, 0x61, 0x51, 0x49, 0x46}, // 2
+		{0x21, 0x41, 0x45, 0x4B, 0x31}, // 3
+		{0x18, 0x14, 0x12, 0x7F, 0x10}, // 4
+		{0x27, 0x45, 0x45, 0x45, 0x39}, // 5
+		{0x3C, 0x4A, 0x49, 0x49, 0x30}, // 6
+		{0x01, 0x71, 0x09, 0x05, 0x03}, // 7
+		{0x36, 0x49, 0x49, 0x49, 0x36}, // 8
+		{0x06, 0x49, 0x49, 0x29, 0x1E}, // 9
+		{0x00, 0x00, 0x00, 0x00, 0x00}, // 空格 (索引10)
 };
 
 static void font_draw_char(uint8_t *img, int16_t cx, int16_t cy, uint8_t ch, uint8_t color)
 {
-    uint8_t col;
-    int16_t row;
-    uint16_t idx;
-    int16_t px;
-    int16_t py;
+	uint8_t col;
+	int16_t row;
+	uint16_t idx;
+	int16_t px;
+	int16_t py;
 
-    if (ch > 10) return;
+	if (ch > 10)
+		return;
 
-    for (col = 0; col < 5; col++)
-    {
-        px = cx + (int16_t)col;
-        if (px < 0 || px >= (int16_t)MT9V034_WIDTH) continue;
+	for (col = 0; col < 5; col++)
+	{
+		px = cx + (int16_t)col;
+		if (px < 0 || px >= (int16_t)MT9V034_WIDTH)
+			continue;
 
-        for (row = 0; row < 7; row++)
-        {
-            py = cy + row;
-            if (py < 0 || py >= (int16_t)MT9V034_HEIGHT) continue;
+		for (row = 0; row < 7; row++)
+		{
+			py = cy + row;
+			if (py < 0 || py >= (int16_t)MT9V034_HEIGHT)
+				continue;
 
-            if (s_font_5x7[ch][col] & (1 << row))
-            {
-                idx = (uint16_t)py * MT9V034_WIDTH + (uint16_t)px;
-                img[idx] = color;
-            }
-        }
-    }
+			if (s_font_5x7[ch][col] & (1 << row))
+			{
+				idx = (uint16_t)py * MT9V034_WIDTH + (uint16_t)px;
+				img[idx] = color;
+			}
+		}
+	}
 }
 
 static void draw_element_indicator(uint8_t *out, TRACK_ELEMENT elem)
 {
-    uint8_t tens;
-    uint8_t ones;
-    int16_t x0;
-    int16_t y0;
+	uint8_t tens;
+	uint8_t ones;
+	int16_t x0;
+	int16_t y0;
 
-    x0 = (int16_t)(MT9V034_WIDTH - 20);
-    y0 = (int16_t)(MT9V034_HEIGHT - 12);
+	x0 = (int16_t)(MT9V034_WIDTH - 20);
+	y0 = (int16_t)(MT9V034_HEIGHT - 12);
 
-    tens = (uint8_t)elem / 10;
-    ones = (uint8_t)elem % 10;
+	tens = (uint8_t)elem / 10;
+	ones = (uint8_t)elem % 10;
 
-    if (tens > 0)
-    {
-        font_draw_char(out, x0, y0, tens, 220);
-        font_draw_char(out, x0 + (int16_t)6, y0, ones, 220);
-    }
-    else
-    {
-        font_draw_char(out, x0 + (int16_t)3, y0, ones, 220);
-    }
+	if (tens > 0)
+	{
+		font_draw_char(out, x0, y0, tens, 220);
+		font_draw_char(out, x0 + (int16_t)6, y0, ones, 220);
+	}
+	else
+	{
+		font_draw_char(out, x0 + (int16_t)3, y0, ones, 220);
+	}
 }
 
 /* 靶子绘制: 检测到黑色圆环时, 在叠加图上画十字准心 + 圆环轮廓 */
 static void draw_target_overlay(uint8_t *out)
 {
-    int16_t cx;
-    int16_t cy;
-    int16_t r;
-    int16_t y;
-    int16_t d;
-    int16_t x0;
-    int16_t y0;
-    int16_t x;
+	int16_t cx;
+	int16_t cy;
+	int16_t r;
+	int16_t y;
+	int16_t d;
+	int16_t x0;
+	int16_t y0;
+	int16_t x;
 
-    if (!g_target_detected)
-        return;
+	if (!g_target_detected)
+		return;
 
-    cx = (int16_t)g_target_center_x;
-    cy = (int16_t)g_target_y_mid;
-    r  = (int16_t)g_target_radius;
+	cx = (int16_t)g_target_center_x;
+	cy = (int16_t)g_target_y_mid;
+	r = (int16_t)g_target_radius;
 
-    if (cx < 5 || cx >= (int16_t)(MT9V034_WIDTH - 5))
-        return;
-    if (cy < 5 || cy >= (int16_t)(MT9V034_HEIGHT - 5))
-        return;
-    if (r < 1 || r > 80)
-        return;
+	if (cx < 5 || cx >= (int16_t)(MT9V034_WIDTH - 5))
+		return;
+	if (cy < 5 || cy >= (int16_t)(MT9V034_HEIGHT - 5))
+		return;
+	if (r < 1 || r > 80)
+		return;
 
-    /* 十字准心: 7px 臂长 */
-    for (d = -7; d <= 7; d++)
-    {
-        overlay_pixel(out, (int16_t)(cx + d), cy, 0);
-        overlay_pixel(out, cx, (int16_t)(cy + d), 0);
-    }
+	/* 十字准心: 7px 臂长 */
+	for (d = -7; d <= 7; d++)
+	{
+		overlay_pixel(out, (int16_t)(cx + d), cy, 0);
+		overlay_pixel(out, cx, (int16_t)(cy + d), 0);
+	}
 
-    /* 垂直虚线: 扫描范围内, 标出靶心列 */
-    y0 = (int16_t)(MT9V034_HEIGHT - 25);   /* 对应 trail.c TARGET_SCAN_Y_START = 95 */
-    for (y = (int16_t)(MT9V034_HEIGHT / 4); y <= y0; y++)  /* TARGET_SCAN_Y_END = 30 */
-    {
-        if ((y & 3) == 0)
-            overlay_pixel(out, cx, y, 0);
-    }
+	/* 垂直虚线: 扫描范围内, 标出靶心列 */
+	y0 = (int16_t)(MT9V034_HEIGHT - 25);				  /* 对应 trail.c TARGET_SCAN_Y_START = 95 */
+	for (y = (int16_t)(MT9V034_HEIGHT / 4); y <= y0; y++) /* TARGET_SCAN_Y_END = 30 */
+	{
+		if ((y & 3) == 0)
+			overlay_pixel(out, cx, y, 0);
+	}
 
-    /* 水平虚线: 在靶心行标出靶环宽度 */
-    x0 = cx - r;
-    if (x0 < 0) x0 = 0;
-    for (x = x0; x <= cx + r && x < (int16_t)MT9V034_WIDTH; x++)
-    {
-        if ((x & 3) == 0)
-            overlay_pixel(out, x, cy, 0);
-    }
+	/* 水平虚线: 在靶心行标出靶环宽度 */
+	x0 = cx - r;
+	if (x0 < 0)
+		x0 = 0;
+	for (x = x0; x <= cx + r && x < (int16_t)MT9V034_WIDTH; x++)
+	{
+		if ((x & 3) == 0)
+			overlay_pixel(out, x, cy, 0);
+	}
 
-    /* 圆环轮廓: Bresenham 中点画圆, 虚线 */
-    {
-        int16_t xi;
-        int16_t yi;
-        int16_t d;
+	/* 圆环轮廓: Bresenham 中点画圆, 虚线 */
+	{
+		int16_t xi;
+		int16_t yi;
+		int16_t d;
 
-        xi = 0;
-        yi = r;
-        d = (int16_t)(1 - r);
+		xi = 0;
+		yi = r;
+		d = (int16_t)(1 - r);
 
-        while (xi <= yi)
-        {
-            /* 8 个对称点, 隔点画虚线 */
-            if ((xi & 1) == 0)
-            {
-                overlay_pixel(out, (int16_t)(cx + xi), (int16_t)(cy + yi), 0);
-                overlay_pixel(out, (int16_t)(cx - xi), (int16_t)(cy + yi), 0);
-                overlay_pixel(out, (int16_t)(cx + xi), (int16_t)(cy - yi), 0);
-                overlay_pixel(out, (int16_t)(cx - xi), (int16_t)(cy - yi), 0);
-                overlay_pixel(out, (int16_t)(cx + yi), (int16_t)(cy + xi), 0);
-                overlay_pixel(out, (int16_t)(cx - yi), (int16_t)(cy + xi), 0);
-                overlay_pixel(out, (int16_t)(cx + yi), (int16_t)(cy - xi), 0);
-                overlay_pixel(out, (int16_t)(cx - yi), (int16_t)(cy - xi), 0);
-            }
+		while (xi <= yi)
+		{
+			/* 8 个对称点, 隔点画虚线 */
+			if ((xi & 1) == 0)
+			{
+				overlay_pixel(out, (int16_t)(cx + xi), (int16_t)(cy + yi), 0);
+				overlay_pixel(out, (int16_t)(cx - xi), (int16_t)(cy + yi), 0);
+				overlay_pixel(out, (int16_t)(cx + xi), (int16_t)(cy - yi), 0);
+				overlay_pixel(out, (int16_t)(cx - xi), (int16_t)(cy - yi), 0);
+				overlay_pixel(out, (int16_t)(cx + yi), (int16_t)(cy + xi), 0);
+				overlay_pixel(out, (int16_t)(cx - yi), (int16_t)(cy + xi), 0);
+				overlay_pixel(out, (int16_t)(cx + yi), (int16_t)(cy - xi), 0);
+				overlay_pixel(out, (int16_t)(cx - yi), (int16_t)(cy - xi), 0);
+			}
 
-            if (d < 0)
-            {
-                d += (int16_t)(2 * xi + 3);
-            }
-            else
-            {
-                d += (int16_t)(2 * (xi - yi) + 5);
-                yi--;
-            }
-            xi++;
-        }
-    }
+			if (d < 0)
+			{
+				d += (int16_t)(2 * xi + 3);
+			}
+			else
+			{
+				d += (int16_t)(2 * (xi - yi) + 5);
+				yi--;
+			}
+			xi++;
+		}
+	}
 }
 
 static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_track_result_t *track)
@@ -984,10 +996,14 @@ static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_t
 	draw_current_center_overlay(out, track);
 	{
 		TRACK_ELEMENT elem;
-		if (cross_phase != CROSS_PHASE_NONE) elem = CROSS;
-		else if (huandao_state != HUANDAO_NONE) elem = RING_r;
-		else if (road_type.bend) elem = (l_invalid_cnt > r_invalid_cnt) ? RIGHT_ANGLE_r : RIGHT_ANGLE_l;
-		else elem = STRAIGHT;
+		if (cross_phase != CROSS_PHASE_NONE)
+			elem = CROSS;
+		else if (huandao_state != HUANDAO_NONE)
+			elem = RING_r;
+		else if (road_type.bend)
+			elem = (l_invalid_cnt > r_invalid_cnt) ? RIGHT_ANGLE_r : RIGHT_ANGLE_l;
+		else
+			elem = STRAIGHT;
 		draw_element_indicator(out, elem);
 	}
 	draw_target_overlay(out);
