@@ -3,21 +3,17 @@
 
 #include "vision.h"
 #include "vision_track.h"
-#include "vision_master.h"
 
 #include "key.h"
 #include "icm.h"
 #include "motor.h"
 #include "encoder.h"
 #include "servo.h"
+#include "laser.h"
 
-#include "control.h"
 #include "pid.h"
+#include "control.h"
 #include "trail.h"
-#include "track_fsm.h"
-#include "ring_fsm.h"
-#include "speed_tune.h"
-// #include "laser.h"
 
 #define LED GPIO_PB6
 

@@ -24,8 +24,7 @@ extern ring_fsm_t g_ring_fsm;
 
 void ring_fsm_init(ring_fsm_t *rf);
 void ring_fsm_reset(ring_fsm_t *rf);
-TRACK_ELEMENT ring_fsm_process(ring_fsm_t *rf, TRACK_ELEMENT seg_elem);
-uint8_t       ring_fsm_get_target(const ring_fsm_t *rf);
-uint8_t       ring_fsm_is_active(const ring_fsm_t *rf);
+uint8_t ring_fsm_get_target(const ring_fsm_t *rf);
+uint8_t ring_fsm_is_active(const ring_fsm_t *rf);
 
 #endif

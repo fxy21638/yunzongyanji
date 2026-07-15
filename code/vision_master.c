@@ -231,8 +231,8 @@ static void stabilize_cross_boundaries(const vision_track_result_t *track, int16
 	uint16_t y_fit_end;
 	static uint8_t cross_hold = 0;
 
-	// 直接使用 trail 层 FSM 过滤后的元素判断，FSM 已含滞回
-	if (track_element == CROSS)
+	// 直接使用 49.9 cross_phase 判断
+	if (cross_phase != CROSS_PHASE_NONE)
 	{
 		cross_hold = 4;
 	}
@@ -793,12 +793,15 @@ static void draw_current_center_overlay(uint8_t *out, const vision_track_result_
 	int16_t cx;
 	int16_t cy;
 
-	if (track_midpoint_target < 0 || track_midpoint_target >= (int16_t)MT9V034_WIDTH)
 	{
-		return;
+		int16_t tgt;
+		tgt = image_position[(int16_t)VISION_LOOKAHEAD_Y];
+		if (tgt < 0 || tgt >= (int16_t)MT9V034_WIDTH)
+		{
+			return;
+		}
+		cx = tgt;
 	}
-
-	cx = track_midpoint_target;
 	cy = (int16_t)VISION_LOOKAHEAD_Y;
 	if (cy < 0)
 	{
@@ -979,7 +982,14 @@ static void render_overlay_mid(uint8_t *out, const uint8_t *gray, const vision_t
 	draw_bev_boundaries_overlay(out, track);
 	draw_bev_midline_overlay(out, track);
 	draw_current_center_overlay(out, track);
-	draw_element_indicator(out, track_element);
+	{
+		TRACK_ELEMENT elem;
+		if (cross_phase != CROSS_PHASE_NONE) elem = CROSS;
+		else if (huandao_state != HUANDAO_NONE) elem = RING_r;
+		else if (road_type.bend) elem = (l_invalid_cnt > r_invalid_cnt) ? RIGHT_ANGLE_r : RIGHT_ANGLE_l;
+		else elem = STRAIGHT;
+		draw_element_indicator(out, elem);
+	}
 	draw_target_overlay(out);
 }
 
