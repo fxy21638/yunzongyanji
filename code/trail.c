@@ -7,9 +7,11 @@
 #include "laser.h"
 
 extern uint8_t xdata mt9v034_image[MT9V034_HEIGHT][MT9V034_WIDTH];
+extern uint8_t g_slope_detected;
 
 /* ==== 全局变量 ==== */
 uint8_t g_track_valid = 0, g_target_detected = 0, g_target_center_x = 94, g_target_radius = 0, g_target_y_mid = 60, g_vofa_pending = 0;
+uint8_t g_obstacle_detected = 0, g_obstacle_center_x = 94, g_obstacle_width = 0;
 image_t image_data[MT9V034_HEIGHT * MT9V034_WIDTH];
 vision_track_result_t g_track;
 int16_t Image_Error = 0, posi = 0;
@@ -355,7 +357,6 @@ static void calc_midline(void)
             image_position[i] = MT9V034_WIDTH / 2;
         g_mid_out[i] = image_position[i];
     }
-    l_effect_num = l_effect_num; /* 保持编译兼容 */
 }
 
 /* ==== 误差: 全图下半部均值 + 强平滑(20%新) ==== */
@@ -481,6 +482,51 @@ void huandao_fill(void) {
     if(huandao_state==HUANDAO_STATE4||huandao_state==HUANDAO_STATE5){int16_t rb=IMAGE_H-1,cb=(l_effect_flag[IMAGE_H-1])?l_border[IMAGE_H-1]:SEARCH_MIN,rt=0,ct=188,cv;for(i=rt;i<=rb;i++){cv=ct+(int16_t)(((int32_t)(cb-ct)*(i-rt))/(rb-rt));cv=limit_ab(cv,SEARCH_MIN,SEARCH_MAX);l_border[i]=cv;l_effect_flag[i]=1;}for(i=first_end+1;i<IMAGE_H;i++){r_border[i]=SEARCH_MAX;r_effect_flag[i]=1;}}
 }
 
+/* ==== 障碍检测: 赛道内连续暗像素 ≥ OBS_DW_MIN 即判定 ==== */
+#define OBS_DW_MIN 15
+#define OBS_DW_MAX 120
+#define OBS_DARK_THRESH 100  /* 低于此灰度值算"暗" */
+
+static void detect_obstacle(void){
+    int16_t r,c,start,dark_cnt;
+    static uint8_t obs_lost=0; /* 连续丢失帧计数 */
+    uint8_t found=0;
+
+    /* 只在直道检测, 弯道边界不全易误判 */
+    if(!road_type.straight){obs_lost++;if(obs_lost>5){g_obstacle_detected=0;obs_lost=0;}return;}
+
+    for(r=TARGET_ROW_START;r>=TARGET_ROW_END;r-=TARGET_ROW_STEP){
+        int16_t rl,rr; rl=l_effect_flag[r]?l_border[r]:SEARCH_MIN; rr=r_effect_flag[r]?r_border[r]:SEARCH_MAX;
+        if(rl>rr||rr-rl<30)continue;
+
+        /* 扫描连续暗像素 */
+        dark_cnt=0;start=0;
+        for(c=rl;c<=rr;c++){
+            if(mt9v034_image[(uint16_t)r][(uint16_t)c]<=OBS_DARK_THRESH){
+                if(!dark_cnt)start=c;
+                dark_cnt++;
+            }else{
+                if(dark_cnt>=OBS_DW_MIN&&dark_cnt<=OBS_DW_MAX){
+                    g_obstacle_center_x=(uint8_t)(start+dark_cnt/2);
+                    g_obstacle_width=(uint8_t)dark_cnt;
+                    found=1;
+                }
+                dark_cnt=0;
+            }
+        }
+        /* 行末检查 */
+        if(dark_cnt>=OBS_DW_MIN&&dark_cnt<=OBS_DW_MAX){
+            g_obstacle_center_x=(uint8_t)(start+dark_cnt/2);
+            g_obstacle_width=(uint8_t)dark_cnt;
+            found=1;
+        }
+    }
+
+    /* 保持: 检测到立即置1, 连续丢5帧才清零 */
+    if(found){g_obstacle_detected=1;obs_lost=0;}
+    else{obs_lost++;if(obs_lost>5){g_obstacle_detected=0;obs_lost=0;}}
+}
+
 /* ==== 占位 ==== */
 void target_detect(void) {}
 void laser_off_handler(void) {}
@@ -500,6 +546,8 @@ void image_process(void)
 #else
     cross_detect();
 #endif
+    /* 障碍检测 */
+    detect_obstacle();
     /* 补线 (修改边界, 必须在 calc_midline 之前) */
     if(!huandao_state)cross_fill();
     if(!cross_phase)huandao_fill();
@@ -555,6 +603,19 @@ void debug_ips_display(void)
     ips_show_int(55, row, (int32_t)Image_Error, 4);
     ips_show_string(100, row, "Spd:");
     ips_show_int(145, row, (int32_t)speed_base, 3);
+    row += 18;
+    {extern float roll,pitch,yaw;
+     ips_show_string(10, row, "R:"); ips_show_int(30, row, (int32_t)roll, 3);
+     ips_show_string(60, row, "P:"); ips_show_int(80, row, (int32_t)pitch, 3);
+     ips_show_string(110, row, "Y:"); ips_show_int(130, row, (int32_t)yaw, 3);
+     {if(g_slope_detected) ips_show_string(165, row, "SLP");}}
+    row += 18;
+    if (g_obstacle_detected) {
+        ips_show_string(10, row, "OBS!");
+        ips_show_int(55, row, (int32_t)g_obstacle_center_x, 3);
+        ips_show_string(95, row, "w:");
+        ips_show_int(115, row, (int32_t)g_obstacle_width, 3);
+    }
     row += 18;
     ips_show_string(10, row, "HW:");
     ips_show_int(40, row, (int32_t)g_hw_bottom, 3);

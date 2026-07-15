@@ -37,6 +37,7 @@ extern MPID_t motor_pid_L, motor_pid_R;
 
 extern float speed_base;
 extern float speed_now_l, speed_now_r;
+extern uint8_t g_slope_detected;
 
 /* ---- 舵机控制 ---- */
 void servo_pd_set(void);

@@ -375,11 +375,6 @@
               <FilePath>.\code\icm.h</FilePath>
             </File>
             <File>
-              <FileName>control.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\code\control.c</FilePath>
-            </File>
-            <File>
               <FileName>control.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\control.h</FilePath>
@@ -393,6 +388,11 @@
               <FileName>pid.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\pid.h</FilePath>
+            </File>
+            <File>
+              <FileName>control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\control.c</FilePath>
             </File>
             <File>
               <FileName>trail.c</FileName>

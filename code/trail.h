@@ -53,7 +53,7 @@ typedef enum {
 #define CROSS_PHASE_ENTERING 2
 #define CROSS_PHASE_IN_BEND  3
 #define CROSS_PHASE_EXITING  4
-#define CROSS_INVALID_MIN    30
+#define CROSS_INVALID_MIN    20  /* 原30, 降低提前识别斜入十字 */
 #define CROSS_ENTERING_TH    50
 #define CROSS_IN_BEND_TH     25
 #define CROSS_EXITING_TH     55
@@ -158,13 +158,27 @@ int16_t  limit_ab(int16_t x, int16_t a, int16_t b);
 int16_t  limit_float(int16_t x, int16_t y);
 int16_t  calc_diff(int16_t x, int16_t y);
 
+/* ---- extern 变量 ---- */
+extern uint8_t g_track_valid;
+extern uint8_t g_target_detected, g_target_center_x, g_target_radius;
+extern uint8_t g_obstacle_detected, g_obstacle_center_x, g_obstacle_width;
+extern int16_t Image_Error, posi;
+extern int16_t l_border[IMAGE_H], r_border[IMAGE_H];
+extern int16_t image_position[IMAGE_H];
+extern int8_t l_effect_flag[IMAGE_H], r_effect_flag[IMAGE_H];
+extern int16_t l_effect_num, r_effect_num;
+extern int16_t l_invalid_cnt, r_invalid_cnt;
+extern uint8_t cross_state, cross_phase, huandao_state;
+extern struct road_type_t road_type;
+extern const uint8_t Half_Road_Wide[120];
+
+/* ---- 函数声明 ---- */
 void search_white(uint8_t *photo, uint16_t point_num);
 void search_longest_white_col(void);
 void search_border(void);
 void GetDet(void);
 void search_line(void);
 void image_process(void);
-
 void cross_detect(void);
 void cross_fill(void);
 void huandao_detect(void);
