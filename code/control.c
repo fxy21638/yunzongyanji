@@ -241,6 +241,15 @@ static void control_timer_callback(void)
 
     laser_off_handler(); /* 靶子激光倒计时 */
 
+    /* 斑马线检测到 → 立即停车 */
+    if (g_stop_detected)
+    {
+        control_clear();
+        Set_PWM(0, 0);
+        servo_set_wheel_angle(0.0f);
+        return;
+    }
+
     /* 坡道检测 */
 #if SLOPE_ENABLE
     {

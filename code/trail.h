@@ -152,6 +152,10 @@ extern int16_t  sudu_yingzi_val;
 extern const uint8_t Half_Road_Wide[120];
 extern uint8_t  g_track_valid;
 
+/* ---- 启动/停止标志 ---- */
+extern uint8_t  g_start_ready;
+extern volatile uint8_t g_stop_detected;
+
 /* ---- 函数声明 ---- */
 int16_t  myabs(int16_t dat);
 int16_t  limit_ab(int16_t x, int16_t a, int16_t b);
@@ -179,6 +183,8 @@ void search_border(void);
 void GetDet(void);
 void search_line(void);
 void image_process(void);
+uint8_t detect_start_card(void);
+void check_stop_line(void);
 void cross_detect(void);
 void cross_fill(void);
 void huandao_detect(void);

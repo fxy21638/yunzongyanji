@@ -1053,3 +1053,140 @@ void debug_ips_display(void)
     ips_show_string(80, row, "W:");
     ips_show_int(100, row, (int32_t)(l_effect_num + r_effect_num), 3);
 }
+
+/* ====================================================================
+ * 第 N 节 — 启动/停止标志检测 (49.9)
+ * ==================================================================== */
+
+uint8_t g_start_ready = 0;
+volatile uint8_t g_stop_detected = 0;
+
+/* 检测黑色启动卡片 — 上电后等待移除
+ * 方法: 比较底部(卡片区域)与参考区(卡片上方赛道)的平均亮度
+ * 底部亮度 < 参考区亮度 × 50% → 有黑色卡片遮盖
+ * 自适应光照, 不受阴影/褐色靶子干扰 */
+uint8_t detect_start_card(void)
+{
+    uint16_t y, x;
+    uint32_t sum_ref, sum_bot;
+    uint16_t cnt_ref, cnt_bot;
+    uint16_t avg_ref, avg_bot;
+
+    sum_ref = 0;
+    cnt_ref = 0;
+    /* 参考区: 卡片上方 10 行赛道的亮度 (rows 85~94) */
+    for (y = IMAGE_H - 35; y < IMAGE_H - 25; y++)
+    {
+        for (x = (uint16_t)(CENTER_POINT - 45); x <= (uint16_t)(CENTER_POINT + 45); x++)
+        {
+            if (x >= IMAGE_W)
+                continue;
+            sum_ref += mt9v034_image[y][x];
+            cnt_ref++;
+        }
+    }
+
+    sum_bot = 0;
+    cnt_bot = 0;
+    /* 底部: 卡片放置区域 (rows 100~119) */
+    for (y = IMAGE_H - 20; y < IMAGE_H; y++)
+    {
+        for (x = (uint16_t)(CENTER_POINT - 45); x <= (uint16_t)(CENTER_POINT + 45); x++)
+        {
+            if (x >= IMAGE_W)
+                continue;
+            sum_bot += mt9v034_image[y][x];
+            cnt_bot++;
+        }
+    }
+
+    if (cnt_ref == 0 || cnt_bot == 0)
+        return 0;
+
+    avg_ref = (uint16_t)(sum_ref / cnt_ref);
+    avg_bot = (uint16_t)(sum_bot / cnt_bot);
+
+    /* 参考区足够亮(在赛道上) 且 底部亮度不到参考区一半 → 黑卡 */
+    if (avg_ref > 80 && avg_bot < avg_ref * 50 / 100)
+        return 1;
+
+    return 0;
+}
+
+/* 检测斑马线停止线 (超轻量版)
+ * 条纹: 平行赛道, 竖向暗条纹 2.5cm宽×10cm长, 2.5cm间隙
+ * 优化: 白参考只需1行11像素; 每列先查底部像素再决定是否深入扫描
+ * 无斑马线: 11+41=52次读取  (约3个calc_diff的计算量)
+ * 有斑马线: 11+41+~300=352次读取 */
+#define ZEBRA_COL_LEFT    (CENTER_POINT - 20)  /* 扫描列范围左 */
+#define ZEBRA_COL_RIGHT   (CENTER_POINT + 20)  /* 扫描列范围右 */
+#define ZEBRA_SCAN_DEPTH   30   /* 从底部往上扫30行 */
+#define ZEBRA_STRIPE_H     12   /* 一列连续暗像素≥12 = 竖向条纹 */
+#define ZEBRA_MIN_COLS      6   /* 至少6列有竖向条纹 → 确认斑马线 */
+
+void check_stop_line(void)
+{
+    uint16_t y, x;
+    uint16_t ref_avg, dark_th;
+
+    if (!g_track_valid)
+        return;
+
+    /* ===== 白参考: 取 row=80 中心11像素平均, 仅1行 ===== */
+    ref_avg = (uint16_t)mt9v034_image[IMAGE_H - 40][CENTER_POINT];
+    for (x = 1; x <= 5; x++)
+    {
+        ref_avg += mt9v034_image[IMAGE_H - 40][CENTER_POINT - x];
+        ref_avg += mt9v034_image[IMAGE_H - 40][CENTER_POINT + x];
+    }
+    ref_avg /= 11;
+
+    if (ref_avg < 80)
+        return;
+
+    dark_th = ref_avg * 40 / 100;
+
+    /* ===== 逐列扫描, 先查底部再决定是否深入 ===== */
+    {
+        int16_t streak_cols;
+        uint16_t scan_x;
+
+        streak_cols = 0;
+
+        for (x = ZEBRA_COL_LEFT; x <= ZEBRA_COL_RIGHT; x++)
+        {
+            scan_x = (uint16_t)x;
+
+            /* 快速预检: 底部像素不暗 → 这列不可能有竖向条纹, 跳过 */
+            if (mt9v034_image[IMAGE_H - 1][scan_x] >= dark_th)
+                continue;
+
+            /* 底部暗了 → 从底往上扫, 数连续暗像素 */
+            {
+                int16_t cs;
+                cs = 0;
+                for (y = IMAGE_H - 1; y >= IMAGE_H - ZEBRA_SCAN_DEPTH; y--)
+                {
+                    if (mt9v034_image[(uint16_t)y][scan_x] < dark_th)
+                    {
+                        cs++;
+                        if (cs >= ZEBRA_STRIPE_H)
+                        {
+                            streak_cols++;
+                            if (streak_cols >= ZEBRA_MIN_COLS)
+                            {
+                                g_stop_detected = 1;
+                                return;
+                            }
+                            break;
+                        }
+                    }
+                    else
+                    {
+                        cs = 0;
+                    }
+                }
+            }
+        }
+    }
+}
