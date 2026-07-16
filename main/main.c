@@ -6,7 +6,7 @@
 #include "main.h"
 #include "control.h"
 
-#define DEBUG_IPS_DISPLAY 1 /* 1=开启IPS屏幕调试, 0=关闭 */
+#define DEBUG_IPS_DISPLAY 0 /* 1=开启IPS屏幕调试, 0=关闭 */
 
 void System_Init(void);
 
