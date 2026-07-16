@@ -375,21 +375,6 @@
               <FilePath>.\code\icm.h</FilePath>
             </File>
             <File>
-              <FileName>laser.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\code\laser.c</FilePath>
-            </File>
-            <File>
-              <FileName>laser.h</FileName>
-              <FileType>5</FileType>
-              <FilePath>.\code\laser.h</FilePath>
-            </File>
-            <File>
-              <FileName>control.c</FileName>
-              <FileType>1</FileType>
-              <FilePath>.\code\control.c</FilePath>
-            </File>
-            <File>
               <FileName>control.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\control.h</FilePath>
@@ -405,6 +390,11 @@
               <FilePath>.\code\pid.h</FilePath>
             </File>
             <File>
+              <FileName>control.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\control.c</FilePath>
+            </File>
+            <File>
               <FileName>trail.c</FileName>
               <FileType>1</FileType>
               <FilePath>.\code\trail.c</FilePath>
@@ -413,6 +403,26 @@
               <FileName>trail.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\trail.h</FilePath>
+            </File>
+            <File>
+              <FileName>track_fsm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\track_fsm.c</FilePath>
+            </File>
+            <File>
+              <FileName>track_fsm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\track_fsm.h</FilePath>
+            </File>
+            <File>
+              <FileName>ring_fsm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\ring_fsm.c</FilePath>
+            </File>
+            <File>
+              <FileName>ring_fsm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\ring_fsm.h</FilePath>
             </File>
             <File>
               <FileName>vision.c</FileName>
@@ -473,6 +483,16 @@
               <FileName>speed_tune.h</FileName>
               <FileType>5</FileType>
               <FilePath>.\code\speed_tune.h</FilePath>
+            </File>
+            <File>
+              <FileName>laser.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>.\code\laser.c</FilePath>
+            </File>
+            <File>
+              <FileName>laser.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>.\code\laser.h</FilePath>
             </File>
           </Files>
         </Group>

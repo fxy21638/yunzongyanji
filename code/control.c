@@ -11,60 +11,49 @@
 #include "trail.h"
 #include "laser.h"
 
-extern uint8_t l_huandao_state;
-
 /* ================================================================
  * 第 1 节 — 全局变量 + 全部可调参数
  * ================================================================ */
 
-float speed_base = 40.0f; /* 基准速度 (直道全速) */
+float speed_base = 45.0f; /* 基准速度 (直道全速) */
 int16_t error = 0;
 int16_t error_last = 0;
 static float servo_d_filter = 0.0f;
 
 /* ---- 舵机参数 ---- */
-#define SERVO_P_BASE 0.50f   /* 直道P, 快速修正 */
-#define SERVO_P_SCALE 0.005f  /* P增长率 */
-#define SERVO_P_MAX 0.90f    /* P上限 */
-#define SERVO_D 4.50f        /* D降低, 响应更快 */
-#define SERVO_D_FILTER 0.30f /* D 滤波: 旧值权重 (0~1, 越大越平滑) */
+#define SERVO_P_BASE 0.50f   /* 直道小偏差 P */
+#define SERVO_P_SCALE 0.010f /* P 随偏差增长率 (abs_err×SCALE) */
+#define SERVO_P_MAX 1.20f    /* P 上限 */
+#define SERVO_D 5.50f        /* D 固定 */
+#define SERVO_D_FILTER 0.40f /* D 滤波: 旧值权重 (0~1, 越大越平滑) */
 #define SERVO_LIMIT 50.0f    /* 舵机输出限幅 */
 
-/* 十字 */
-#define CROSS_P_SCALE 4.00f /* 十字 P = 0.55×2.0 = 1.10 */
-#define CROSS_D       5.00f
-#define CROSS_SPEED   35.0f
-#define CROSS_DIFF_K  0.45f
-
-/* 环岛 (49.9原值: P=1.70~1.85, D=4.20~4.90, speed=22~24) */
-/* 环岛: 检测+补线启用, PD/速度沿用正常参数 (补线处理边界丢失) */
-#define HUANDAO_ENABLE 1      /* 1=启用环岛检测+补线, 0=跳过 */
-#define RING_P        0.65  /* 环岛P=正常P, 不切换 */
-#define RING_D        4.50f       /* 环岛D=正常D */
-#define RING_SPEED    35.0f    /* 环岛速度=正常速度 */
-#define RING_DIFF_K   0.35f
+/* 十字用时 P 乘这个系数 */
+#define CROSS_P_SCALE 2.00f /* 十字 P = SERVO_P_BASE × CROSS_P_SCALE */
+#define CROSS_SPEED 32.0f   /* 十字基准速度 */
+#define CROSS_DIFF_K 0.45f
 
 /* ---- 电机速度参数 ---- */
 #define MOTOR_KP 0.60f
-#define MOTOR_KI 0.20f
+#define MOTOR_KI 0.15f
 #define MOTOR_KD 0.00f
 #define MOTOR_D_LP 0.35f
 #define PID_LIMIT 1500.0f      /* 正常限幅 */
-#define PID_LIMIT_HILL 2500.0f /* 上坡限幅 */
+#define PID_LIMIT_HILL 4000.0f /* 上坡限幅 */
 #define MOTOR_I_MAX 500.0f     /* I 项上限 */
-#define MOTOR_RAMP_UP 2.0f     /* 加速: 慢 */
-#define MOTOR_RAMP_DN 5.0f     /* 减速: 快 */
+#define MOTOR_RAMP_UP 3.0f     /* 加速斜率 */
+#define MOTOR_RAMP_DN 3.0f     /* 减速斜率 */
 #define MOTOR_MIN_SPEED 30.0f  /* 最低速度 */
 
 /* ---- 速度连续映射: speed = BASE - abs_err × SCALE, 下限 MIN ---- */
-#define SPD_SCALE 0.35f  /* 偏差→减速系数, 弯道更慢 */
-#define DIFF_K_MAX 0.20f /* 差速系数上限 (原0.40, 降半防啸叫) */
+#define SPD_SCALE 0.30f  /* 偏差→减速系数 */
+#define DIFF_K_MAX 0.20f /* 差速系数上限 */
 
 /* ---- 坡道 ---- */
-#define SLOPE_ENABLE 0
-#define SLOPE_ENTER_DEG 15.0f
-#define SLOPE_EXIT_DEG 5.0f
-#define SLOPE_UP_SPEED 320.0f
+#define SLOPE_ENABLE 1
+#define SLOPE_ENTER_DEG 10.0f
+#define SLOPE_EXIT_DEG 3.0f
+#define SLOPE_UP_SPEED 250.0f
 #define SLOPE_DN_SPEED -20.0f
 
 /* ---- 赛车线 (暂关闭: START_ERR=0) ---- */
@@ -80,9 +69,6 @@ int32_t cnt_degree = 0;
 float ring_start_yaw = 0.0f;
 uint8_t g_slope_detected = 0;
 
-/* ---- 避障 ---- */
-#define OBS_AVOID_ENABLE 0 /* 1=启用避障, 0=仅检测不避让 */
-
 /* ==== 舵机 PD ==== */
 static float g_z_p = SERVO_P_BASE, g_z_d = SERVO_D;
 
@@ -92,20 +78,16 @@ static void servo_pd_set(void)
     a = error;
     if (a < 0)
         a = -a;
-    if (huandao_state != HUANDAO_NONE || l_huandao_state != HUANDAO_NONE)
-    {
-        g_z_p = RING_P;
-        g_z_d = RING_D;
-    }
-    else if (cross_state || cross_phase != CROSS_PHASE_NONE)
+    if (cross_state || cross_phase != CROSS_PHASE_NONE)
     {
         g_z_p = SERVO_P_BASE * CROSS_P_SCALE;
-        g_z_d = CROSS_D;
+        g_z_d = SERVO_D;
     }
     else
     {
         g_z_p = SERVO_P_BASE + (float)a * SERVO_P_SCALE;
-        if (g_z_p > SERVO_P_MAX) g_z_p = SERVO_P_MAX;
+        if (g_z_p > SERVO_P_MAX)
+            g_z_p = SERVO_P_MAX;
         g_z_d = SERVO_D;
     }
 }
@@ -222,11 +204,7 @@ static void track_motor_control(void)
     if (a < 0)
         a = -a;
 
-    if (huandao_state != HUANDAO_NONE || l_huandao_state != HUANDAO_NONE)
-    {
-        final_motor_control((int16_t)RING_SPEED, RING_DIFF_K, 11);
-    }
-    else if (cross_state || cross_phase != CROSS_PHASE_NONE)
+    if (cross_state || cross_phase != CROSS_PHASE_NONE)
     {
         final_motor_control((int16_t)CROSS_SPEED, CROSS_DIFF_K, 12);
     }
@@ -263,12 +241,27 @@ static void control_timer_callback(void)
 
     laser_off_handler(); /* 靶子激光倒计时 */
 
-    /* 坡道检测: 纯阈值, 无计数 */
+    /* 坡道检测 */
 #if SLOPE_ENABLE
-    if (roll > SLOPE_ENTER_DEG || roll < -SLOPE_ENTER_DEG)
-        g_slope_detected = 1;
-    else
-        g_slope_detected = 0;
+    {
+        static uint8_t slope_cnt = 0;
+        if (roll > SLOPE_ENTER_DEG || roll < -SLOPE_ENTER_DEG)
+        {
+            slope_cnt++;
+            if (slope_cnt > 3)
+                g_slope_detected = 1;
+        }
+        else if (roll < SLOPE_EXIT_DEG && roll > -SLOPE_EXIT_DEG)
+        {
+            slope_cnt = 0;
+            g_slope_detected = 0;
+        }
+        else
+        {
+            slope_cnt = 0;
+            g_slope_detected = 0;
+        }
+    }
 #endif
 
     if (speed_tune_mode)
@@ -278,14 +271,20 @@ static void control_timer_callback(void)
         return;
     }
 
-    /* 坡道速度调节: 上坡加速, 下坡减速 */
+#define OBS_AVOID_ENABLE 0 /* 1=启用避障, 0=仅检测不避让 */
+
+    /* 坡道速度调节 */
 #if SLOPE_ENABLE
     if (g_slope_detected)
     {
         if (roll > 5.0f)
-            motor_output(200, 200); /* 上坡加速 */
+        {
+            motor_output(250, 250); /* 上坡加速 */
+        }
         else
-            motor_output(10, 10);   /* 下坡减速 */
+        {
+            motor_output(-20, -20); /* 下坡减速 */
+        }
         return;
     }
 #endif

@@ -5,7 +5,6 @@
 
 #include "trail.h"
 #include "laser.h"
-#include "control.h"
 
 extern uint8_t xdata mt9v034_image[MT9V034_HEIGHT][MT9V034_WIDTH];
 extern uint8_t g_slope_detected;
@@ -31,11 +30,8 @@ uint8_t cross_state = 0, cross_phase = 0, huandao_state = HUANDAO_NONE;
 int16_t l_down_point = 0, r_down_point = 0, l_up_point = 0, r_up_point = 0;
 int16_t l_dp_prev = 0, r_dp_prev = 0, l_up_prev = 0, r_up_prev = 0;
 int16_t l_slope_num = 0, l_slope_den = 1, r_slope_num = 0, r_slope_den = 1;
-/* 右环岛 */
+/* 环岛 */
 int16_t hd_r_dp = 0, hd_r_up = 0, hd_l_up = 0, hd_l_tp = 0;
-/* 左环岛 */
-uint8_t  l_huandao_state = HUANDAO_NONE;
-int16_t l_hd_l_dp = 0, l_hd_l_up = 0, l_hd_r_up = 0, l_hd_r_tp = 0;
 struct road_type_t road_type = {0};
 int16_t sudu_yingzi_val = 0, Search_Stop_Line = 0, Both_Lost_Time = 0;
 int16_t white_length_max[2][1], white_length[2][WH_COL_NUM];
@@ -734,49 +730,86 @@ static void hd_frup(void)
         }
 }
 
-/* Front_Car 策略: 一侧边界很完整(>80行) + 另一侧几乎全丢(<8行) = 环岛 */
-#define RING_VALID_TH 80  /* "直"侧最少有效行 */
-#define RING_LOST_TH   8  /* "丢"侧最多有效行 */
-
 void huandao_detect(void)
 {
     int16_t rf;
     switch (huandao_state)
     {
     case HUANDAO_NONE:
-    {   /* 右环岛: 左侧直, 右侧丢, 且右边界第一有效行靠上(>110排除出口) */
-        int16_t rf2 = hd_get_rf();
-        if (l_effect_num > RING_VALID_TH && r_effect_num < RING_LOST_TH
-            && rf2 >= 0 && rf2 < HD_R_START_MIN_ROW)
-            huandao_state = HUANDAO_STATE1;
-    }   break;
+        hd_frdp();
+        if (!hd_r_dp || hd_r_dp > IMAGE_H - 1 - HD_R_DOWN_MIN_DIST || hd_r_dp < HD_R_DOWN_MIN_ROW || !hd_chk_lc() || !hd_chk_rl(hd_r_dp, 2) || Search_Stop_Line <= 100)
+            break;
+        huandao_state = HUANDAO_STATE1;
+        break;
     case HUANDAO_STATE1:
+        hd_frdp();
+        if (!hd_chk_lc())
+            break;
         rf = hd_get_rf();
-        if (rf < 0 || rf >= HD_R_START_MIN_ROW) break;
-        huandao_state = HUANDAO_STATE2; break;
+        if (rf < 0 || rf >= HD_R_START_MIN_ROW || hd_r_dp)
+            break;
+        huandao_state = HUANDAO_STATE2;
+        break;
     case HUANDAO_STATE2:
         rf = hd_get_rf();
-        if (rf > HD_R_START_MIN_ROW) huandao_state = HUANDAO_STATE2B; break;
+        if (rf > HD_R_START_MIN_ROW)
+            huandao_state = HUANDAO_STATE2B;
+        break;
     case HUANDAO_STATE2B:
-        rf = hd_get_rf(); if (rf < 0 || rf >= HD_R_START_MIN_ROW) break;
-        hd_frup(); if (hd_r_up) huandao_state = HUANDAO_STATE3; break;
+        rf = hd_get_rf();
+        if (rf < 0 || rf >= HD_R_START_MIN_ROW)
+            break;
+        hd_frup();
+        if (hd_r_up)
+            huandao_state = HUANDAO_STATE3;
+        break;
     case HUANDAO_STATE3:
-        if ((IMAGE_H - 1 - white_length_max[0][0]) < 80) huandao_state = HUANDAO_STATE4; break;
+        hd_frup();
+        if ((IMAGE_H - 1 - white_length_max[0][0]) >= 80)
+            break;
+        if ((IMAGE_H - 1 - white_length_max[0][0]) < 80)
+            huandao_state = HUANDAO_STATE4;
+        break;
     case HUANDAO_STATE4:
-        if ((IMAGE_H - 1 - white_length_max[0][0]) > 80) huandao_state = HUANDAO_STATE5; break;
+        if ((IMAGE_H - 1 - white_length_max[0][0]) > 80)
+            huandao_state = HUANDAO_STATE5;
+        break;
     case HUANDAO_STATE5:
-    {   int16_t ii, lwc = white_length_max[1][0];
+    {
+        int16_t ii, lwc = white_length_max[1][0], di, du, dd;
         hd_l_tp = 0;
         for (ii = IMAGE_H - 3; ii >= first_end + 2; ii--)
             if (l_effect_flag[ii] && l_effect_flag[ii - 2] && l_effect_flag[ii + 2])
-            { int16_t di = myabs(l_border[ii] - lwc), du = myabs(l_border[ii - 2] - lwc), dd = myabs(l_border[ii + 2] - lwc);
-              if (du > di && dd > di) { hd_l_tp = ii; break; } }
-        hd_l_up = hd_l_tp; if (!hd_l_tp) huandao_state = HUANDAO_STATE6;
-    } break;
+            {
+                di = myabs(l_border[ii] - lwc);
+                du = myabs(l_border[ii - 2] - lwc);
+                dd = myabs(l_border[ii + 2] - lwc);
+                if (du > di && dd > di)
+                {
+                    hd_l_tp = ii;
+                    break;
+                }
+            }
+        hd_l_up = hd_l_tp;
+        if (!hd_l_tp)
+            huandao_state = HUANDAO_STATE6;
+    }
+    break;
     case HUANDAO_STATE6:
-        hd_frup(); if (hd_r_up > 0) huandao_state = HUANDAO_STATE7; break;
+        if (Search_Stop_Line <= 100)
+            break;
+        hd_frup();
+        if (hd_r_up > 0)
+            huandao_state = HUANDAO_STATE7;
+        break;
     case HUANDAO_STATE7:
-        hd_frup(); if (!hd_r_up) { huandao_state = HUANDAO_NONE; hd_r_dp = hd_r_up = hd_l_up = hd_l_tp = 0; } break;
+        hd_frup();
+        if (!hd_r_up)
+        {
+            huandao_state = HUANDAO_NONE;
+            hd_r_dp = hd_r_up = hd_l_up = hd_l_tp = 0;
+        }
+        break;
     }
 }
 void huandao_fill(void)
@@ -830,115 +863,6 @@ void huandao_fill(void)
     }
 }
 
-/* ==== 左环岛 (镜像右环岛) ==== */
-static int16_t lhd_get_lf(void)
-{
-    int16_t i;
-    for (i = IMAGE_H - 1; i > first_end; i--)
-        if (l_effect_flag[i]) return i;
-    return -1;
-}
-static uint8_t lhd_chk_rc(void)
-{
-    int16_t i, vc = 0;
-    uint8_t st = 0;
-    for (i = IMAGE_H - 1; i > first_end; i--)
-    {
-        if (!st) { if (r_effect_flag[i]) { st = 1; vc = 1; } }
-        else { if ((r_border[i + 1] - r_border[i]) >= HD_R_CONT_JUMP_TH) return 0; vc++; }
-    }
-    return (vc >= HD_R_EFFECT_MIN) ? 1 : 0;
-}
-static uint8_t lhd_chk_lr(int16_t fr, int16_t st)
-{
-    int16_t i;
-    if (st < 1) st = 1;
-    if (fr >= IMAGE_H) fr = IMAGE_H - 1;
-    for (i = fr; i > first_end; i -= st)
-        if (!l_effect_flag[i] && !r_effect_flag[i]) return 0;
-    return 1;
-}
-static void lhd_fldp(void)
-{
-    int16_t i;
-    l_hd_l_dp = 0;
-    for (i = IMAGE_H - 1 - 3; i >= HD_R_DOWN_MIN_ROW; i--)
-        if (l_effect_flag[i] && l_effect_flag[i + 1] && l_effect_flag[i + 2] && !l_effect_flag[i - 3] && !l_effect_flag[i - 4] && myabs(l_border[i] - l_border[i + 1]) <= HD_R_STABLE_TH && myabs(l_border[i + 1] - l_border[i + 2]) <= HD_R_STABLE_TH && myabs(l_border[i] - l_border[i - 3]) >= HD_R_STABLE_TH)
-        { l_hd_l_dp = i; break; }
-}
-static void lhd_flup(void)
-{
-    int16_t i;
-    l_hd_l_up = 0;
-    for (i = IMAGE_H - 2; i > first_end + 1; i--)
-        if (l_effect_flag[i] && l_effect_flag[i - 1] && !l_effect_flag[i + 1] && l_border[i] > HD_L_UP_MAX_COL)
-        { l_hd_l_up = i; break; }
-}
-
-/* 左环岛 (Front_Car 策略: 右侧直 + 左侧丢) */
-void left_huandao_detect(void)
-{
-    int16_t lf;
-    switch (l_huandao_state)
-    {
-    case HUANDAO_NONE:
-    {   int16_t lf2 = lhd_get_lf();
-        if (r_effect_num > RING_VALID_TH && l_effect_num < RING_LOST_TH
-            && lf2 >= 0 && lf2 < HD_R_START_MIN_ROW)
-            l_huandao_state = HUANDAO_STATE1;
-    }   break;
-    case HUANDAO_STATE1:
-        lf = lhd_get_lf(); if (lf < 0 || lf >= HD_R_START_MIN_ROW) break;
-        l_huandao_state = HUANDAO_STATE2; break;
-    case HUANDAO_STATE2:
-        lf = lhd_get_lf(); if (lf > HD_R_START_MIN_ROW) l_huandao_state = HUANDAO_STATE2B; break;
-    case HUANDAO_STATE2B:
-        lf = lhd_get_lf(); if (lf < 0 || lf >= HD_R_START_MIN_ROW) break;
-        lhd_flup(); if (l_hd_l_up) l_huandao_state = HUANDAO_STATE3; break;
-    case HUANDAO_STATE3:
-        if ((IMAGE_H - 1 - white_length_max[0][0]) < 80) l_huandao_state = HUANDAO_STATE4; break;
-    case HUANDAO_STATE4:
-        if ((IMAGE_H - 1 - white_length_max[0][0]) > 80) l_huandao_state = HUANDAO_STATE5; break;
-    case HUANDAO_STATE5:
-    {   int16_t ii, lwc = white_length_max[1][0];
-        l_hd_r_tp = 0;
-        for (ii = IMAGE_H - 3; ii >= first_end + 2; ii--)
-            if (r_effect_flag[ii] && r_effect_flag[ii - 2] && r_effect_flag[ii + 2])
-            { int16_t di = myabs(r_border[ii] - lwc), du = myabs(r_border[ii - 2] - lwc), dd = myabs(r_border[ii + 2] - lwc);
-              if (du > di && dd > di) { l_hd_r_tp = ii; break; } }
-        l_hd_r_up = l_hd_r_tp; if (!l_hd_r_tp) l_huandao_state = HUANDAO_STATE6;
-    } break;
-    case HUANDAO_STATE6:
-        lhd_flup(); if (l_hd_l_up > 0) l_huandao_state = HUANDAO_STATE7; break;
-    case HUANDAO_STATE7:
-        lhd_flup(); if (!l_hd_l_up) { l_huandao_state = HUANDAO_NONE; l_hd_l_dp = l_hd_l_up = l_hd_r_up = l_hd_r_tp = 0; } break;
-    }
-}
-
-void left_huandao_fill(void)
-{
-    int16_t i, hi, nv;
-    if (l_huandao_state == HUANDAO_STATE1 || l_huandao_state == HUANDAO_STATE2 || l_huandao_state == HUANDAO_STATE2B)
-        for (i = IMAGE_H - 1; i > first_end; i--)
-            if (r_effect_flag[i])
-            { hi = i; if (hi < 0) hi = 0; if (hi > 119) hi = 119;
-              nv = r_border[i] - 2 * (int16_t)Half_Road_Wide[hi];
-              if (nv < SEARCH_MIN) nv = SEARCH_MIN; l_border[i] = nv; l_effect_flag[i] = 1; }
-    if (l_huandao_state == HUANDAO_STATE7)
-        for (i = IMAGE_H - 1; i > first_end; i--)
-            if (r_effect_flag[i])
-            { hi = i; if (hi < 0) hi = 0; if (hi > 119) hi = 119;
-              nv = r_border[i] - 2 * (int16_t)Half_Road_Wide[hi] - HD_HALF_WIDTH_RIGHT_OFFSET;
-              if (nv < SEARCH_MIN) nv = SEARCH_MIN; l_border[i] = nv; l_effect_flag[i] = 1; }
-    if (l_huandao_state == HUANDAO_STATE4 || l_huandao_state == HUANDAO_STATE5)
-    {
-        int16_t rb = IMAGE_H - 1, cb = (r_effect_flag[IMAGE_H - 1]) ? r_border[IMAGE_H - 1] : SEARCH_MAX, rt = 0, ct = 1, cv;
-        for (i = rt; i <= rb; i++)
-        { cv = ct + (int16_t)(((int32_t)(cb - ct) * (i - rt)) / (rb - rt)); cv = limit_ab(cv, SEARCH_MIN, SEARCH_MAX); r_border[i] = cv; r_effect_flag[i] = 1; }
-        for (i = first_end + 1; i < IMAGE_H; i++) { l_border[i] = SEARCH_MIN; l_effect_flag[i] = 1; }
-    }
-}
-
 /* ==== 障碍检测: 赛道内连续暗像素 ≥ OBS_DW_MIN 即判定 ==== */
 #define OBS_DW_MIN 15
 #define OBS_DW_MAX 120
@@ -954,7 +878,7 @@ static void detect_obstacle(void)
     if (!road_type.straight)
     {
         obs_lost++;
-        if (obs_lost > 15)
+        if (obs_lost > 5)
         {
             g_obstacle_detected = 0;
             obs_lost = 0;
@@ -1010,7 +934,7 @@ static void detect_obstacle(void)
     else
     {
         obs_lost++;
-        if (obs_lost > 15)
+        if (obs_lost > 5)
         {
             g_obstacle_detected = 0;
             obs_lost = 0;
@@ -1040,16 +964,13 @@ void image_process(void)
 #else
     cross_detect();
 #endif
-    /* 左环岛 (先右后左, 互斥: 已检测到右环岛时跳过左) */
-#if HUANDAO_ENABLE
-    if (!huandao_state && !cross_phase) left_huandao_detect();
-#endif
-    /* 障碍检测 (环岛/十字期间跳过, 防误判) */
-    if (huandao_state == HUANDAO_NONE && l_huandao_state == HUANDAO_NONE && cross_phase == CROSS_PHASE_NONE)
-        detect_obstacle();
+    /* 障碍检测 */
+    detect_obstacle();
     /* 补线 (修改边界, 必须在 calc_midline 之前) */
-    if (!huandao_state && !l_huandao_state) cross_fill();
-    if (!cross_phase) { huandao_fill(); left_huandao_fill(); }
+    if (!huandao_state)
+        cross_fill();
+    if (!cross_phase)
+        huandao_fill();
     /* 中线+误差 */
     calc_midline();
     Image_Error = calc_error();
@@ -1107,16 +1028,16 @@ void debug_ips_display(void)
     row += 18;
     {
         extern float roll, pitch, yaw;
-        ips_show_string(10, row, "r:");
-        ips_show_int(28, row, (int32_t)roll, 3);
-        ips_show_string(55, row, "p:");
-        ips_show_int(73, row, (int32_t)pitch, 3);
-        ips_show_string(100, row, "y:");
-        ips_show_int(118, row, (int32_t)yaw, 3);
-        ips_show_string(145, row, "H");
-        ips_show_int(155, row, (int32_t)huandao_state, 1);
-        ips_show_string(162, row, "h");
-        ips_show_int(172, row, (int32_t)l_huandao_state, 1);
+        ips_show_string(10, row, "R:");
+        ips_show_int(30, row, (int32_t)roll, 3);
+        ips_show_string(60, row, "P:");
+        ips_show_int(80, row, (int32_t)pitch, 3);
+        ips_show_string(110, row, "Y:");
+        ips_show_int(130, row, (int32_t)yaw, 3);
+        {
+            if (g_slope_detected)
+                ips_show_string(165, row, "SLP");
+        }
     }
     row += 18;
     if (g_obstacle_detected)
